@@ -7,6 +7,8 @@ from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from fastapi.middleware.cors import CORSMiddleware
+
 
 from .audio import wav_to_mp3
 from .backend_pool import BackendPool
@@ -60,6 +62,16 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
+# --- ここから追加 ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# --- ここまで ---
 
 app.mount("/static", StaticFiles(directory="/srv/static"), name="static")
 
