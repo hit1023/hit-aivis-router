@@ -3,8 +3,6 @@ import itertools
 import logging
 from dataclasses import dataclass, field
 
-import httpx
-
 from .aivis_client import AivisClient
 from .model_manager import ModelManager
 
@@ -73,36 +71,6 @@ class BackendPool:
                     ],
                 })
         return results
-
-    async def install_model_from_url(self, url: str) -> None:
-        """全バックエンドに同じモデルをURLからインストールする。
-        AIVISサーバーがURLに直接アクセスできる場合はそちらに任せ、
-        できない場合はラッパーがダウンロードして転送する。
-        """
-        try:
-            await asyncio.gather(
-                *(b.client.install_model_from_url(url) for b in self._backends)
-            )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 500:
-                # AIVISサーバーがURLに直接アクセスできない → ラッパーが代理ダウンロード
-                logger.info("Direct URL install failed, falling back to proxy download")
-                await self._proxy_install(url)
-            else:
-                raise
-        await asyncio.gather(*(b.manager.refresh() for b in self._backends))
-
-    async def _proxy_install(self, url: str) -> None:
-        """ラッパーがURLからダウンロードし、全バックエンドにアップロードする。"""
-        filename = url.split("?")[0].rstrip("/").split("/")[-1]
-        async with httpx.AsyncClient(timeout=600.0, follow_redirects=True) as dl:
-            r = await dl.get(url)
-            r.raise_for_status()
-            data = r.content
-        logger.info("Proxy downloaded %s (%d bytes), uploading to backends", filename, len(data))
-        await asyncio.gather(
-            *(b.client.install_model_from_bytes(filename, data) for b in self._backends)
-        )
 
     async def force_unload(self, aivm_uuid: str) -> list[str]:
         """指定UUIDのモデルを全バックエンドから強制アンロード。アンロードしたバックエンドURLのリストを返す。"""

@@ -132,14 +132,6 @@ class ModelStatus(BaseModel):
     speakers: list[ModelSpeaker] = Field(..., description="このモデルに含まれるスピーカーの一覧")
 
 
-class InstallRequest(BaseModel):
-    url: str = Field(
-        ...,
-        description="インストールするAIVMXファイルのURL（`.aivmx` 形式）",
-        examples=["https://example.com/my_model.aivmx"],
-    )
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -246,35 +238,6 @@ async def list_models():
     except Exception as exc:
         logger.error("models fetch failed: %s", exc)
         raise HTTPException(status_code=502, detail="モデル情報の取得に失敗しました")
-
-
-@app.post(
-    "/models/install",
-    summary="カスタムモデルをURLからインストール",
-    description="""
-指定したURLのAIVMXモデルファイルを全バックエンドサーバーにインストールします。
-
-- AIVISサーバーが直接URLからダウンロードするため、ラッパー経由の二重転送が発生しません
-- AIVISサーバーがURLに届かない場合はラッパーが代理ダウンロードして転送します
-- 複数バックエンドが設定されている場合は全台に同時インストールします
-- インストール完了後、スピーカーマッピングを自動で更新します
-- ダウンロードサイズによっては完了まで数分かかる場合があります
-
-**ファイルの直接アップロードは非対応です。**
-ローカルファイルをインストールしたい場合は、AIVISサーバーに直接アクセスしてください。
-""",
-    tags=["モデル管理"],
-)
-async def install_model(req: InstallRequest):
-    url = req.url.strip()
-    if not url.split("?")[0].endswith(".aivmx"):
-        raise HTTPException(status_code=400, detail="URLは .aivmx ファイルを指定してください")
-    try:
-        await pool.install_model_from_url(url)
-    except Exception as exc:
-        logger.error("model install failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"モデルのインストールに失敗しました: {exc}")
-    return {"message": "インストールが完了しました", "url": url}
 
 
 @app.post(
