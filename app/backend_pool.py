@@ -39,6 +39,11 @@ class BackendPool:
     async def start_cleanup_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
+            # Bug3修正: バックエンドの実際の状態を同期してからアンロード判定
+            await asyncio.gather(
+                *(b.manager.refresh() for b in self._backends),
+                return_exceptions=True,
+            )
             await asyncio.gather(
                 *(b.manager.unload_idle() for b in self._backends),
                 return_exceptions=True,

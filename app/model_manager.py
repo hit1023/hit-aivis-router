@@ -33,11 +33,11 @@ class ModelManager:
         # speaker_uuid → aivm_uuid  (manifest uses "uuid", not "speaker_uuid")
         uuid_to_model: dict[str, str] = {}
         for aivm_uuid, info in models.items():
-            already_known = aivm_uuid in self._loaded
+            was_loaded = self._loaded.get(aivm_uuid, False)  # Bug1修正: already_known → was_loaded
             is_loaded = info.get("is_loaded", False)
             self._loaded[aivm_uuid] = is_loaded
-            # 起動前からロード済みのモデルもタイマー対象にする
-            if is_loaded and not already_known and aivm_uuid not in self._last_used:
+            # ロード済みへの遷移時のみタイマーを開始（外部でのロードも検知）
+            if is_loaded and not was_loaded and aivm_uuid not in self._last_used:
                 self._last_used[aivm_uuid] = time.monotonic()
             for spk in info.get("manifest", {}).get("speakers", []):
                 s_uuid = spk.get("uuid", "")
@@ -89,5 +89,6 @@ class ModelManager:
                     try:
                         await self.client.unload_model(uuid)
                         self._loaded[uuid] = False
+                        self._last_used.pop(uuid)  # Bug2修正: アンロード後にタイムスタンプを削除
                     except Exception as exc:
                         logger.warning("Failed to unload %s: %s", uuid, exc)
