@@ -2,9 +2,10 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -15,11 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from .audio import wav_to_mp3
 from .backend_pool import BackendPool
 from .config import settings
+from .text_replacer import TextReplacer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
 pool: BackendPool
+replacer: TextReplacer
 
 _DESCRIPTION = """
 ## 概要
@@ -44,7 +47,8 @@ AivisSpeech Engine のシンプルなラッパー API です。
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool
+    global pool, replacer
+    replacer = TextReplacer(Path(settings.text_replacements_file))
     pool = BackendPool(settings.backend_urls, idle_timeout=settings.model_idle_timeout)
     try:
         await pool.initialize()
@@ -181,8 +185,12 @@ async def speak(req: SpeakRequest):
         logger.error("Model load failed: %s", exc)
         raise HTTPException(status_code=503, detail="音声モデルの読み込みに失敗しました")
 
+    processed_text = replacer.apply(req.text)
+    if processed_text != req.text:
+        logger.info("テキスト置換: %r → %r", req.text, processed_text)
+
     try:
-        query = await backend.client.audio_query(req.text, req.speaker_id)
+        query = await backend.client.audio_query(processed_text, req.speaker_id)
     except Exception as exc:
         logger.error("audio_query failed: %s", exc)
         raise HTTPException(status_code=502, detail="音声クエリの生成に失敗しました")
@@ -490,4 +498,76 @@ async def delete_user_dict_word(word_uuid: str) -> Response:
     except Exception as exc:
         logger.error("delete_user_dict_word failed: %s", exc)
         raise HTTPException(status_code=502, detail="単語の削除に失敗しました")
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# テキスト置換ルール
+# ---------------------------------------------------------------------------
+
+class TextReplacementRequest(BaseModel):
+    """テキスト置換ルールの追加リクエスト。"""
+    model_config = {"json_schema_extra": {
+        "example": {
+            "src": "Mumon",
+            "dst": "ミューモン",
+        }
+    }}
+
+    src: str = Field(..., description="置換前テキスト（空不可）")
+    dst: str = Field("", description="置換後テキスト（空文字列も可）")
+
+
+@app.get(
+    "/text_replacements",
+    summary="テキスト置換ルール一覧の取得",
+    description="""
+音声合成前にテキストへ適用される置換ルールの一覧を返します。
+
+ルールは `/speak` 実行時に **長い置換前テキストを優先** して適用されます。
+これにより MeCab が英単語を誤読するケースなどを事前に修正できます。
+""",
+    tags=["テキスト置換"],
+)
+async def get_text_replacements() -> dict:
+    return replacer.get_all()
+
+
+@app.post(
+    "/text_replacements",
+    summary="テキスト置換ルールを追加・更新",
+    description="""
+テキスト置換ルールを追加します。既存の `src` を指定した場合は上書き更新されます。
+
+例: `src="Mumon"`, `dst="ミューモン"` を登録すると、
+`/speak` へ送られるテキスト中の `Mumon` が `ミューモン` に変換されてから
+AivisSpeech へ渡されます。
+""",
+    tags=["テキスト置換"],
+)
+async def add_text_replacement(req: TextReplacementRequest) -> dict:
+    try:
+        replacer.add(req.src, req.dst)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"src": req.src, "dst": req.dst}
+
+
+@app.delete(
+    "/text_replacements",
+    status_code=204,
+    summary="テキスト置換ルールを削除",
+    description="""
+指定した置換前テキスト（`src`）に対応するルールを削除します。
+
+`src` はクエリパラメータとして渡してください。
+""",
+    tags=["テキスト置換"],
+)
+async def delete_text_replacement(
+    src: str = Query(..., description="削除する置換前テキスト"),
+) -> Response:
+    found = replacer.remove(src)
+    if not found:
+        raise HTTPException(status_code=404, detail="指定された置換ルールが見つかりません")
     return Response(status_code=204)

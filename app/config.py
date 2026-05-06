@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     mp3_bitrate: str = "192k"
     host: str = "0.0.0.0"
     port: int = 8000
+    text_replacements_file: str = "/data/text_replacements.json"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
