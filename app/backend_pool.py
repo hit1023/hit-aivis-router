@@ -89,5 +89,59 @@ class BackendPool:
                     unloaded.append(b.url)
         return unloaded
 
+    # ------------------------------------------------------------------
+    # ユーザー辞書
+    # ------------------------------------------------------------------
+
+    async def get_user_dict(self, enable_compound_accent: bool = False) -> dict:
+        """最初のバックエンドからユーザー辞書を取得する。"""
+        return await self._backends[0].client.get_user_dict(enable_compound_accent)
+
+    async def add_user_dict_word(
+        self,
+        surface: list[str],
+        pronunciation: list[str],
+        accent_type: list[int],
+        word_type: str = "PROPER_NOUN",
+        priority: int = 5,
+    ) -> str:
+        """全バックエンドに単語を追加し、最初のバックエンドから返された word_uuid を返す。"""
+        word_uuid: str | None = None
+        for i, b in enumerate(self._backends):
+            result = await b.client.add_user_dict_word(
+                surface, pronunciation, accent_type, word_type, priority
+            )
+            if i == 0:
+                word_uuid = result
+        assert word_uuid is not None
+        return word_uuid
+
+    async def update_user_dict_word(
+        self,
+        word_uuid: str,
+        surface: list[str],
+        pronunciation: list[str],
+        accent_type: list[int],
+        word_type: str = "PROPER_NOUN",
+        priority: int = 5,
+    ) -> None:
+        """全バックエンドの単語を更新する。"""
+        await asyncio.gather(
+            *(
+                b.client.update_user_dict_word(
+                    word_uuid, surface, pronunciation, accent_type, word_type, priority
+                )
+                for b in self._backends
+            ),
+            return_exceptions=False,
+        )
+
+    async def delete_user_dict_word(self, word_uuid: str) -> None:
+        """全バックエンドから単語を削除する。"""
+        await asyncio.gather(
+            *(b.client.delete_user_dict_word(word_uuid) for b in self._backends),
+            return_exceptions=False,
+        )
+
     async def close(self) -> None:
         await asyncio.gather(*(b.client.close() for b in self._backends))

@@ -42,5 +42,71 @@ class AivisClient:
         r.raise_for_status()
         return r.content
 
+    # ------------------------------------------------------------------
+    # ユーザー辞書
+    # ------------------------------------------------------------------
+
+    async def get_user_dict(self, enable_compound_accent: bool = False) -> dict:
+        """ユーザー辞書の単語一覧を返す。"""
+        r = await self._client.get(
+            f"{self.base_url}/user_dict",
+            params={"enable_compound_accent": str(enable_compound_accent).lower()},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def add_user_dict_word(
+        self,
+        surface: list[str],
+        pronunciation: list[str],
+        accent_type: list[int],
+        word_type: str = "PROPER_NOUN",
+        priority: int = 5,
+    ) -> str:
+        """単語を追加し、word_uuid を返す。"""
+        params: list[tuple[str, str | int]] = []
+        for s in surface:
+            params.append(("surface", s))
+        for p in pronunciation:
+            params.append(("pronunciation", p))
+        for a in accent_type:
+            params.append(("accent_type", a))
+        params.append(("word_type", word_type))
+        params.append(("priority", priority))
+        r = await self._client.post(f"{self.base_url}/user_dict_word", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    async def update_user_dict_word(
+        self,
+        word_uuid: str,
+        surface: list[str],
+        pronunciation: list[str],
+        accent_type: list[int],
+        word_type: str = "PROPER_NOUN",
+        priority: int = 5,
+    ) -> None:
+        """指定 UUID の単語を更新する。"""
+        params: list[tuple[str, str | int]] = []
+        for s in surface:
+            params.append(("surface", s))
+        for p in pronunciation:
+            params.append(("pronunciation", p))
+        for a in accent_type:
+            params.append(("accent_type", a))
+        params.append(("word_type", word_type))
+        params.append(("priority", priority))
+        r = await self._client.put(
+            f"{self.base_url}/user_dict_word/{word_uuid}", params=params
+        )
+        r.raise_for_status()
+
+    async def delete_user_dict_word(self, word_uuid: str) -> None:
+        """指定 UUID の単語を削除する。"""
+        r = await self._client.delete(
+            f"{self.base_url}/user_dict_word/{word_uuid}"
+        )
+        r.raise_for_status()
+
     async def close(self) -> None:
         await self._client.aclose()

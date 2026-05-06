@@ -1,6 +1,8 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from enum import Enum
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
@@ -30,6 +32,7 @@ AivisSpeech Engine のシンプルなラッパー API です。
 - **音声合成** — テキストを指定してMP3音声を取得
 - **自動アンロード** — 最後の使用から **10分** 経過したモデルは自動的にVRAMから解放
 - **複数バックエンド対応** — 複数のAivisSpeechサーバーをラウンドロビンで使用可能
+- **ユーザー辞書** — 固有名詞や読み方を辞書登録して音声合成精度を向上
 
 ## 基本的な使い方
 
@@ -133,7 +136,7 @@ class SpeakerInfo(BaseModel):
 
 class ModelSpeaker(BaseModel):
     name: str = Field(..., description="スピーカー名")
-    local_id: int | None = Field(None, description="モデル内でのローカルID")
+    local_id: Optional[int] = Field(None, description="モデル内でのローカルID")
 
 
 class ModelStatus(BaseModel):
@@ -285,3 +288,206 @@ async def force_unload_model(aivm_uuid: str):
 )
 async def health():
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# ユーザー辞書
+# ---------------------------------------------------------------------------
+
+class WordType(str, Enum):
+    """品詞の種別。"""
+    PROPER_NOUN = "PROPER_NOUN"
+    LOCATION_NAME = "LOCATION_NAME"
+    ORGANIZATION_NAME = "ORGANIZATION_NAME"
+    PERSON_NAME = "PERSON_NAME"
+    PERSON_FAMILY_NAME = "PERSON_FAMILY_NAME"
+    PERSON_GIVEN_NAME = "PERSON_GIVEN_NAME"
+    COMMON_NOUN = "COMMON_NOUN"
+    VERB = "VERB"
+    ADJECTIVE = "ADJECTIVE"
+    SUFFIX = "SUFFIX"
+
+
+_WORD_TYPE_LABELS: dict[str, str] = {
+    "PROPER_NOUN": "固有名詞",
+    "LOCATION_NAME": "地名",
+    "ORGANIZATION_NAME": "組織・施設名",
+    "PERSON_NAME": "人名",
+    "PERSON_FAMILY_NAME": "人名（姓）",
+    "PERSON_GIVEN_NAME": "人名（名）",
+    "COMMON_NOUN": "普通名詞",
+    "VERB": "動詞",
+    "ADJECTIVE": "形容詞",
+    "SUFFIX": "語尾",
+}
+
+
+class UserDictWordRequest(BaseModel):
+    """単語の追加・更新リクエスト。
+
+    単純な1語の場合はリストに要素を1つだけ入れてください。
+    複合語（例: 「新田真剣佑」）は各モーフィームを別々の要素として指定します。
+    """
+    model_config = {"json_schema_extra": {
+        "examples": [
+            {
+                "summary": "単純な1語の例",
+                "value": {
+                    "surface": ["東京スカイツリー"],
+                    "pronunciation": ["トウキョウスカイツリー"],
+                    "accent_type": [5],
+                    "word_type": "PROPER_NOUN",
+                    "priority": 5,
+                }
+            },
+            {
+                "summary": "複合語の例（新田真剣佑）",
+                "value": {
+                    "surface": ["新田", "真剣佑"],
+                    "pronunciation": ["アラタ", "マッケンユウ"],
+                    "accent_type": [1, 3],
+                    "word_type": "PERSON_NAME",
+                    "priority": 7,
+                }
+            },
+        ]
+    }}
+
+    surface: list[str] = Field(
+        ...,
+        min_length=1,
+        description="単語の表層形。複合語の場合は要素を分けて指定します（例: `['新田', '真剣佑']`）",
+    )
+    pronunciation: list[str] = Field(
+        ...,
+        min_length=1,
+        description="カタカナ読み。`surface` と同じ長さのリストで指定します（例: `['アラタ', 'マッケンユウ']`）",
+    )
+    accent_type: list[int] = Field(
+        ...,
+        min_length=1,
+        description="アクセント型。0=平板型、1以上=下がり目の位置（1-indexed）。`surface` と同じ長さで指定します",
+    )
+    word_type: WordType = Field(
+        WordType.PROPER_NOUN,
+        description="品詞種別。" + " / ".join(_WORD_TYPE_LABELS.values()),
+    )
+    priority: int = Field(
+        5,
+        ge=0,
+        le=10,
+        description="優先度（0〜10、推奨: 1〜9）。数値が大きいほど優先されます",
+    )
+
+
+class UserDictWordAdded(BaseModel):
+    word_uuid: str = Field(..., description="追加された単語のUUID。更新・削除に使用します")
+
+
+@app.get(
+    "/user_dict",
+    summary="ユーザー辞書の単語一覧を取得",
+    description="""
+ユーザー辞書に登録されている単語の一覧を返します。
+
+- `enable_compound_accent=false`（デフォルト）: 後方互換モード。各単語は単一のアクセント情報で返されます
+- `enable_compound_accent=true`: 複合語アクセント対応モード（AivisSpeech Engine 1.1.0以降）
+
+辞書は最初のバックエンドサーバーから取得します。
+""",
+    tags=["ユーザー辞書"],
+)
+async def get_user_dict(enable_compound_accent: bool = False) -> dict:
+    try:
+        return await pool.get_user_dict(enable_compound_accent)
+    except Exception as exc:
+        logger.error("get_user_dict failed: %s", exc)
+        raise HTTPException(status_code=502, detail="ユーザー辞書の取得に失敗しました")
+
+
+@app.post(
+    "/user_dict",
+    response_model=UserDictWordAdded,
+    status_code=200,
+    summary="ユーザー辞書に単語を追加",
+    description="""
+ユーザー辞書に新しい単語を追加します。
+
+追加された単語の UUID を返します。この UUID は後で単語の更新・削除に使用します。
+
+複数のバックエンドサーバーがある場合は、全サーバーに同時に追加します。
+""",
+    tags=["ユーザー辞書"],
+)
+async def add_user_dict_word(req: UserDictWordRequest) -> UserDictWordAdded:
+    if len(req.surface) != len(req.pronunciation) or len(req.surface) != len(req.accent_type):
+        raise HTTPException(
+            status_code=422,
+            detail="surface / pronunciation / accent_type のリスト長が一致していません",
+        )
+    try:
+        word_uuid = await pool.add_user_dict_word(
+            surface=req.surface,
+            pronunciation=req.pronunciation,
+            accent_type=req.accent_type,
+            word_type=req.word_type.value,
+            priority=req.priority,
+        )
+    except Exception as exc:
+        logger.error("add_user_dict_word failed: %s", exc)
+        raise HTTPException(status_code=502, detail="単語の追加に失敗しました")
+    return UserDictWordAdded(word_uuid=word_uuid)
+
+
+@app.put(
+    "/user_dict/{word_uuid}",
+    status_code=204,
+    summary="ユーザー辞書の単語を更新",
+    description="""
+指定した UUID の単語を更新します。
+
+`word_uuid` は `/user_dict` の GET レスポンスのキー、または単語追加時に返された値です。
+
+複数のバックエンドサーバーがある場合は、全サーバーを同時に更新します。
+""",
+    tags=["ユーザー辞書"],
+)
+async def update_user_dict_word(word_uuid: str, req: UserDictWordRequest) -> Response:
+    if len(req.surface) != len(req.pronunciation) or len(req.surface) != len(req.accent_type):
+        raise HTTPException(
+            status_code=422,
+            detail="surface / pronunciation / accent_type のリスト長が一致していません",
+        )
+    try:
+        await pool.update_user_dict_word(
+            word_uuid=word_uuid,
+            surface=req.surface,
+            pronunciation=req.pronunciation,
+            accent_type=req.accent_type,
+            word_type=req.word_type.value,
+            priority=req.priority,
+        )
+    except Exception as exc:
+        logger.error("update_user_dict_word failed: %s", exc)
+        raise HTTPException(status_code=502, detail="単語の更新に失敗しました")
+    return Response(status_code=204)
+
+
+@app.delete(
+    "/user_dict/{word_uuid}",
+    status_code=204,
+    summary="ユーザー辞書の単語を削除",
+    description="""
+指定した UUID の単語を辞書から削除します。
+
+複数のバックエンドサーバーがある場合は、全サーバーから同時に削除します。
+""",
+    tags=["ユーザー辞書"],
+)
+async def delete_user_dict_word(word_uuid: str) -> Response:
+    try:
+        await pool.delete_user_dict_word(word_uuid)
+    except Exception as exc:
+        logger.error("delete_user_dict_word failed: %s", exc)
+        raise HTTPException(status_code=502, detail="単語の削除に失敗しました")
+    return Response(status_code=204)
