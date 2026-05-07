@@ -1,18 +1,11 @@
 import httpx
 from typing import Any
 
-# AIVIS Engine のインストール API で使うフィールド名
-_INSTALL_FILE_FIELD = "file"
-
 
 class AivisClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=120.0)
-        # 大容量ファイルのアップロード用（読み書きタイムアウトなし）
-        self._install_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=30.0, read=None, write=None, pool=30.0)
-        )
 
     async def get_speakers(self) -> list[dict]:
         r = await self._client.get(f"{self.base_url}/speakers")
@@ -115,15 +108,5 @@ class AivisClient:
         )
         r.raise_for_status()
 
-    async def install_model(self, filename: str, file_data: bytes) -> dict | None:
-        """AIVM ファイルをバックエンドにアップロードしてモデルをインストールする。"""
-        r = await self._install_client.post(
-            f"{self.base_url}/aivm_models/install",
-            files={_INSTALL_FILE_FIELD: (filename, file_data, "application/octet-stream")},
-        )
-        r.raise_for_status()
-        return r.json() if r.content else None
-
     async def close(self) -> None:
         await self._client.aclose()
-        await self._install_client.aclose()
