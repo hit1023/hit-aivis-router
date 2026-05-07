@@ -16,10 +16,12 @@ logger = logging.getLogger(__name__)
 class TextReplacer:
     """送信テキストに置換ルールを適用するクラス。"""
 
-    def __init__(self, rules_file: Path) -> None:
+    def __init__(self, rules_file: Path, seed_file: Path | None = None) -> None:
         self._file = rules_file
         self._rules: dict[str, str] = {}
         self._load()
+        if not self._rules and seed_file and seed_file.exists():
+            self._seed(seed_file)
 
     # ------------------------------------------------------------------
     # 永続化
@@ -34,6 +36,20 @@ class TextReplacer:
             logger.info("テキスト置換ルール %d 件をロード", len(self._rules))
         except Exception as exc:
             logger.warning("置換ルールの読み込みに失敗しました: %s", exc)
+
+    def _seed(self, seed_file: Path) -> None:
+        """name.txt（src@dst 形式）からルールを初期インポートして保存する。"""
+        count = 0
+        for line in seed_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if "@" not in line:
+                continue
+            src, _, dst = line.partition("@")
+            if src and dst:
+                self._rules[src] = dst
+                count += 1
+        self._save()
+        logger.info("name.txt から %d 件の置換ルールを初期インポートしました", count)
 
     def _save(self) -> None:
         self._file.parent.mkdir(parents=True, exist_ok=True)

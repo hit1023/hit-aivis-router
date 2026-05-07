@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY name.txt ./name.txt
 
 # ReDoc・Swagger UI の JS/CSS をローカルにバンドル（CDN不要）
 RUN mkdir -p /srv/static && \

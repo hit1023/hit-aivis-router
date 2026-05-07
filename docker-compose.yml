@@ -1,3 +1,5 @@
+name: aivis-router
+
 services:
   aivis-router:
     build: .

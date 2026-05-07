@@ -48,7 +48,7 @@ AivisSpeech Engine のシンプルなラッパー API です。
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pool, replacer
-    replacer = TextReplacer(Path(settings.text_replacements_file))
+    replacer = TextReplacer(Path(settings.text_replacements_file), seed_file=Path("/srv/name.txt"))
     pool = BackendPool(settings.backend_urls, idle_timeout=settings.model_idle_timeout)
     try:
         await pool.initialize()
