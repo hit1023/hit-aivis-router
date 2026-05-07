@@ -26,8 +26,8 @@ AivisSpeech Engine のシンプルなラッパー API です。
 ### 1. リポジトリをクローン
 
 ```bash
-git clone git@github.com:hit1023/me-aivis-router.git
-cd me-aivis-router
+git clone git@github.com:hit1023/mm-aivis-router.git
+cd mm-aivis-router
 ```
 
 ### 2. 環境変数を設定
