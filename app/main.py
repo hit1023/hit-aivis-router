@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -286,6 +286,267 @@ async def force_unload_model(aivm_uuid: str):
         "unloaded_from": unloaded,
         "message": f"{len(unloaded)}台のサーバーからアンロードしました" if unloaded else "対象モデルはロードされていませんでした",
     }
+
+
+_ALLOWED_EXTENSIONS = {".aivm", ".aivmx"}
+
+
+@app.post(
+    "/models/install",
+    summary="モデルをファイルからインストール",
+    description="""
+`.aivm` / `.aivmx` ファイルをアップロードして AivisSpeech にモデルをインストールします。
+
+- 複数バックエンドがある場合は全台に同時インストールします
+- インストール後、モデルマップを自動更新します
+- ファイルサイズが大きい場合はアップロードに時間がかかります（タイムアウトなし）
+""",
+    tags=["モデル管理"],
+)
+async def install_model(
+    file: UploadFile = File(..., description=".aivm または .aivmx ファイル"),
+):
+    filename = file.filename or "model.aivm"
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if suffix not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"対応していないファイル形式です。{', '.join(_ALLOWED_EXTENSIONS)} のみ使用できます",
+        )
+
+    try:
+        file_data = await file.read()
+    except Exception as exc:
+        logger.error("file read failed: %s", exc)
+        raise HTTPException(status_code=400, detail="ファイルの読み込みに失敗しました")
+
+    logger.info("Installing model: %s (%d bytes)", filename, len(file_data))
+
+    try:
+        results = await pool.install_model(filename, file_data)
+    except Exception as exc:
+        logger.error("install_model failed: %s", exc)
+        raise HTTPException(status_code=502, detail="モデルのインストールに失敗しました")
+
+    errors = [str(r) for r in results if isinstance(r, Exception)]
+    if errors:
+        logger.error("install errors: %s", errors)
+        raise HTTPException(
+            status_code=502,
+            detail="一部のバックエンドでインストールに失敗しました: " + "; ".join(errors),
+        )
+
+    return {
+        "filename": filename,
+        "size_bytes": len(file_data),
+        "installed_backends": len(results),
+        "message": f"{len(results)}台のバックエンドにインストールしました",
+    }
+
+
+_UI_HTML = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIVIS Router - モデル管理</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;padding:24px}
+h1{font-size:1.5rem;font-weight:700;color:#fff;margin-bottom:4px}
+.subtitle{color:#64748b;font-size:.875rem;margin-bottom:32px}
+h2{font-size:1rem;font-weight:600;color:#cbd5e1;margin-bottom:16px}
+.card{background:#1e2130;border:1px solid #2d3148;border-radius:12px;padding:24px;margin-bottom:24px}
+.drop-zone{border:2px dashed #3d4566;border-radius:8px;padding:40px;text-align:center;cursor:pointer;transition:all .2s}
+.drop-zone:hover,.drop-zone.drag-over{border-color:#6366f1;background:#1a1d2e}
+.drop-zone p{color:#64748b;margin-bottom:8px}
+.drop-zone .hint{font-size:.75rem;color:#475569}
+.file-name{margin-top:12px;font-size:.875rem;color:#818cf8;word-break:break-all}
+input[type=file]{display:none}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:8px;border:none;cursor:pointer;font-size:.875rem;font-weight:600;transition:all .2s}
+.btn-primary{background:#6366f1;color:#fff}
+.btn-primary:hover:not(:disabled){background:#4f46e5}
+.btn-primary:disabled{background:#3d4566;color:#64748b;cursor:not-allowed}
+.btn-sm{padding:5px 12px;font-size:.75rem;border-radius:6px}
+.btn-danger{background:transparent;color:#f87171;border:1px solid #7f1d1d}
+.btn-danger:hover{background:#7f1d1d22}
+.actions{margin-top:16px;display:flex;gap:12px;align-items:center}
+.progress{height:4px;background:#2d3148;border-radius:2px;margin-top:16px;overflow:hidden;display:none}
+.progress-bar{height:100%;background:linear-gradient(90deg,#6366f1,#818cf8);animation:indeterminate 1.5s infinite}
+@keyframes indeterminate{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
+.alert{padding:12px 16px;border-radius:8px;font-size:.875rem;margin-top:12px;display:none}
+.alert-success{background:#14532d22;border:1px solid #166534;color:#86efac}
+.alert-error{background:#7f1d1d22;border:1px solid #991b1b;color:#fca5a5}
+table{width:100%;border-collapse:collapse;font-size:.875rem}
+th{text-align:left;color:#64748b;font-weight:500;padding:8px 12px;border-bottom:1px solid #2d3148}
+td{padding:10px 12px;border-bottom:1px solid #1a1d2e;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:.7rem;font-weight:600}
+.badge-loaded{background:#14532d33;color:#86efac}
+.badge-unloaded{background:#1e2130;color:#475569;border:1px solid #2d3148}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.text-muted{color:#475569;font-size:.75rem}
+.spinner{width:14px;height:14px;border:2px solid #3d4566;border-top-color:#6366f1;border-radius:50%;animation:spin .6s linear infinite;display:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+.refresh-btn{background:transparent;border:1px solid #2d3148;color:#64748b;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:.75rem}
+.refresh-btn:hover{border-color:#6366f1;color:#818cf8}
+.header-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+</style>
+</head>
+<body>
+<h1>AIVIS Router</h1>
+<p class="subtitle">モデル管理 UI</p>
+
+<div class="card">
+  <h2>モデルのインストール</h2>
+  <div class="drop-zone" id="dropZone">
+    <p>ここに .aivm / .aivmx ファイルをドロップ</p>
+    <p class="hint">または クリックしてファイルを選択</p>
+    <div class="file-name" id="fileName"></div>
+  </div>
+  <input type="file" id="fileInput" accept=".aivm,.aivmx">
+  <div class="actions">
+    <button class="btn btn-primary" id="installBtn" disabled>インストール</button>
+    <div class="spinner" id="spinner"></div>
+  </div>
+  <div class="progress" id="progress"><div class="progress-bar"></div></div>
+  <div class="alert alert-success" id="successAlert"></div>
+  <div class="alert alert-error" id="errorAlert"></div>
+</div>
+
+<div class="card">
+  <div class="header-row">
+    <h2 style="margin-bottom:0">インストール済みモデル</h2>
+    <button class="refresh-btn" id="refreshBtn">更新</button>
+  </div>
+  <table id="modelsTable">
+    <thead><tr><th>モデル名</th><th>UUID</th><th>バックエンド</th><th>状態</th><th></th></tr></thead>
+    <tbody id="modelsBody"><tr><td colspan="5" class="text-muted" style="text-align:center;padding:20px">読み込み中...</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const fileName = document.getElementById('fileName');
+const installBtn = document.getElementById('installBtn');
+const spinner = document.getElementById('spinner');
+const progress = document.getElementById('progress');
+const successAlert = document.getElementById('successAlert');
+const errorAlert = document.getElementById('errorAlert');
+const modelsBody = document.getElementById('modelsBody');
+
+let selectedFile = null;
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) setFile(f);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) setFile(fileInput.files[0]);
+});
+
+function setFile(f) {
+  selectedFile = f;
+  const mb = (f.size / 1024 / 1024).toFixed(1);
+  fileName.textContent = `${f.name}  (${mb} MB)`;
+  installBtn.disabled = false;
+  hideAlerts();
+}
+
+function hideAlerts() {
+  successAlert.style.display = 'none';
+  errorAlert.style.display = 'none';
+}
+
+installBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  hideAlerts();
+  installBtn.disabled = true;
+  spinner.style.display = 'block';
+  progress.style.display = 'block';
+
+  const form = new FormData();
+  form.append('file', selectedFile, selectedFile.name);
+
+  try {
+    const res = await fetch('/models/install', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    successAlert.textContent = `✓ ${data.message}`;
+    successAlert.style.display = 'block';
+    selectedFile = null;
+    fileName.textContent = '';
+    fileInput.value = '';
+    loadModels();
+  } catch(e) {
+    errorAlert.textContent = `エラー: ${e.message}`;
+    errorAlert.style.display = 'block';
+    installBtn.disabled = false;
+  } finally {
+    spinner.style.display = 'none';
+    progress.style.display = 'none';
+  }
+});
+
+async function unloadModel(uuid) {
+  try {
+    const res = await fetch(`/models/${encodeURIComponent(uuid)}/unload`, { method: 'POST' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    loadModels();
+  } catch(e) {
+    alert(`アンロード失敗: ${e.message}`);
+  }
+}
+
+async function loadModels() {
+  try {
+    const res = await fetch('/models');
+    const models = await res.json();
+    if (models.length === 0) {
+      modelsBody.innerHTML = '<tr><td colspan="5" class="text-muted" style="text-align:center;padding:20px">モデルがありません</td></tr>';
+      return;
+    }
+    modelsBody.innerHTML = models.map(m => `
+      <tr>
+        <td><strong>${escHtml(m.model_name)}</strong>
+          ${m.speakers.length ? '<br><span class="text-muted">' + m.speakers.map(s=>escHtml(s.name)).join(', ') + '</span>' : ''}
+        </td>
+        <td class="text-muted" style="font-family:monospace">${escHtml(m.aivm_uuid.substring(0,8))}…</td>
+        <td class="text-muted">${escHtml(m.backend_url)}</td>
+        <td>${m.is_loaded
+          ? '<span class="badge badge-loaded"><span class="dot"></span>ロード中</span>'
+          : '<span class="badge badge-unloaded">未ロード</span>'}</td>
+        <td>${m.is_loaded
+          ? `<button class="btn btn-sm btn-danger" onclick="unloadModel('${escHtml(m.aivm_uuid)}')">アンロード</button>`
+          : ''}</td>
+      </tr>`).join('');
+  } catch(e) {
+    modelsBody.innerHTML = `<tr><td colspan="5" style="color:#f87171;padding:16px">取得失敗: ${e.message}</td></tr>`;
+  }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.getElementById('refreshBtn').addEventListener('click', loadModels);
+loadModels();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/ui", include_in_schema=False)
+async def webui() -> HTMLResponse:
+    return HTMLResponse(_UI_HTML)
 
 
 @app.get(

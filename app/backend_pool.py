@@ -143,5 +143,19 @@ class BackendPool:
             return_exceptions=False,
         )
 
+    async def install_model(self, filename: str, file_data: bytes) -> list[dict | None]:
+        """全バックエンドに AIVM ファイルをインストールし、インストール後にマネージャーを更新する。"""
+        results = await asyncio.gather(
+            *(b.client.install_model(filename, file_data) for b in self._backends),
+            return_exceptions=True,
+        )
+        # インストール後にスピーカー/モデルマップを再構築
+        await asyncio.gather(
+            *(b.manager.refresh() for b in self._backends),
+            return_exceptions=True,
+        )
+        # 例外をそのまま返さず、エラーは呼び出し元で判断できるようにする
+        return list(results)
+
     async def close(self) -> None:
         await asyncio.gather(*(b.client.close() for b in self._backends))
