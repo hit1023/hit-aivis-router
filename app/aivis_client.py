@@ -108,5 +108,14 @@ class AivisClient:
         )
         r.raise_for_status()
 
+    async def install_model(self, filename: str, data: bytes) -> None:
+        """aivmxファイルをAIVISサーバーにアップロードしてインストール。"""
+        r = await self._client.post(
+            f"{self.base_url}/aivm_models/install",
+            files={"file": (filename, data, "application/octet-stream")},
+            timeout=600.0,
+        )
+        r.raise_for_status()
+
     async def close(self) -> None:
         await self._client.aclose()

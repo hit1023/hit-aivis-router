@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -261,6 +261,34 @@ async def list_models():
     except Exception as exc:
         logger.error("models fetch failed: %s", exc)
         raise HTTPException(status_code=502, detail="モデル情報の取得に失敗しました")
+
+
+@app.post(
+    "/models/install",
+    summary="カスタムモデルをファイルからインストール",
+    description="""
+`.aivmx` 形式のモデルファイルをアップロードして全バックエンドサーバーにインストールします。
+
+- 複数バックエンドが設定されている場合は全台に順次インストールします
+- インストール完了後、スピーカーマッピングを自動で更新します
+- ファイルサイズによっては完了まで数分かかる場合があります
+""",
+    tags=["モデル管理"],
+)
+async def install_model(file: UploadFile = File(...)):
+    filename = file.filename or "model.aivmx"
+    if not filename.split("?")[0].endswith(".aivmx"):
+        raise HTTPException(status_code=400, detail="ファイルは .aivmx 形式を指定してください")
+    data = await file.read()
+    results = await pool.install_model(filename, data)
+    failed = [r for r in results if not r["success"]]
+    if len(failed) == len(results):
+        raise HTTPException(status_code=502, detail="全バックエンドでインストールに失敗しました")
+    return {
+        "filename": filename,
+        "results": results,
+        "message": f"{len(results) - len(failed)}/{len(results)} バックエンドにインストールしました",
+    }
 
 
 @app.post(

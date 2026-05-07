@@ -77,6 +77,20 @@ class BackendPool:
                 })
         return results
 
+    async def install_model(self, filename: str, data: bytes) -> list[dict]:
+        """aivmxファイルを全バックエンドにインストールする。各バックエンドの結果を返す。"""
+        results = []
+        for b in self._backends:
+            try:
+                await b.client.install_model(filename, data)
+                results.append({"backend_url": b.url, "success": True})
+                logger.info("Model installed on %s", b.url)
+            except Exception as exc:
+                results.append({"backend_url": b.url, "success": False, "error": str(exc)})
+                logger.error("Model install failed on %s: %s", b.url, exc)
+        await asyncio.gather(*(b.manager.refresh() for b in self._backends), return_exceptions=True)
+        return results
+
     async def force_unload(self, aivm_uuid: str) -> list[str]:
         """指定UUIDのモデルを全バックエンドから強制アンロード。アンロードしたバックエンドURLのリストを返す。"""
         unloaded = []
