@@ -1,5 +1,3 @@
-name: aivis-router
-
 services:
   aivis-router:
     build: .
@@ -19,3 +17,4 @@ services:
 
 volumes:
   aivis_data:
+    name: aivis-router-data
