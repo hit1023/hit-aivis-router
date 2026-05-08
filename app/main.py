@@ -115,6 +115,9 @@ class SpeakRequest(BaseModel):
             "pitch": 0.0,
             "intonation": 1.0,
             "volume": 1.0,
+            "tempo_dynamics": 1.0,
+            "pause_length": None,
+            "pause_length_scale": 1.0,
         }
     }}
 
@@ -124,6 +127,9 @@ class SpeakRequest(BaseModel):
     pitch: float = Field(0.0, ge=-0.15, le=0.15, description="音高。0.0が標準。正の値で高く、負の値で低くなります（-0.15〜0.15）")
     intonation: float = Field(1.0, ge=0.0, le=2.0, description="抑揚。1.0が標準。大きいほど抑揚が強くなります（0.0〜2.0）")
     volume: float = Field(1.0, ge=0.0, le=2.0, description="音量。1.0が標準（0.0〜2.0）")
+    tempo_dynamics: float = Field(1.0, ge=0.0, le=2.0, description="話す速さの緩急。1.0が標準。大きいほど早口で生っぽい抑揚になります（0.0〜2.0）")
+    pause_length: Optional[float] = Field(None, ge=0.0, description="句読点などの無音時間（秒）。Noneで自動（デフォルト）")
+    pause_length_scale: float = Field(1.0, ge=0.0, description="句読点などの無音時間の倍率。1.0が標準")
 
 
 class SpeakerStyle(BaseModel):
@@ -199,6 +205,10 @@ async def speak(req: SpeakRequest):
     query["pitchScale"] = req.pitch
     query["intonationScale"] = req.intonation
     query["volumeScale"] = req.volume
+    query["tempoDynamicsScale"] = req.tempo_dynamics
+    query["pauseLengthScale"] = req.pause_length_scale
+    if req.pause_length is not None:
+        query["pauseLength"] = req.pause_length
 
     try:
         wav_bytes = await backend.client.synthesis(req.speaker_id, query)
