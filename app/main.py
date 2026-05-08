@@ -109,30 +109,34 @@ async def custom_redoc() -> HTMLResponse:
 # Request / Response schemas
 # ---------------------------------------------------------------------------
 
+_SPEAK_DEFAULTS: dict = {
+    "speed": 1.0,
+    "pitch": 0.0,
+    "intonation": 1.0,
+    "volume": 1.0,
+    "tempo_dynamics": 1.0,
+    "pause_length": None,
+    "pause_length_scale": 1.0,
+}
+
+
 class SpeakRequest(BaseModel):
     model_config = {"json_schema_extra": {
         "example": {
             "text": "こんにちは、元気ですか？",
             "speaker_id": 888753760,
-            "speed": 1.0,
-            "pitch": 0.0,
-            "intonation": 1.0,
-            "volume": 1.0,
-            "tempo_dynamics": 1.0,
-            "pause_length": None,
-            "pause_length_scale": 1.0,
         }
     }}
 
     text: str = Field(..., description="読み上げるテキスト")
     speaker_id: int = Field(..., description="スピーカーのスタイルID（`/speakers` で確認できます）")
-    speed: float = Field(1.0, ge=0.5, le=2.0, description="話速。1.0が標準。大きいほど速くなります（0.5〜2.0）")
-    pitch: float = Field(0.0, ge=-0.15, le=0.15, description="音高。0.0が標準。正の値で高く、負の値で低くなります（-0.15〜0.15）")
-    intonation: float = Field(1.0, ge=0.0, le=2.0, description="抑揚。1.0が標準。大きいほど抑揚が強くなります（0.0〜2.0）")
-    volume: float = Field(1.0, ge=0.0, le=2.0, description="音量。1.0が標準（0.0〜2.0）")
-    tempo_dynamics: float = Field(1.0, ge=0.0, le=2.0, description="話す速さの緩急。1.0が標準。大きいほど早口で生っぽい抑揚になります（0.0〜2.0）")
+    speed: Optional[float] = Field(None, ge=0.5, le=2.0, description="話速。省略時はプリセット→デフォルト(1.0)の順で適用（0.5〜2.0）")
+    pitch: Optional[float] = Field(None, ge=-0.15, le=0.15, description="音高。省略時はプリセット→デフォルト(0.0)の順で適用（-0.15〜0.15）")
+    intonation: Optional[float] = Field(None, ge=0.0, le=2.0, description="抑揚。省略時はプリセット→デフォルト(1.0)の順で適用（0.0〜2.0）")
+    volume: Optional[float] = Field(None, ge=0.0, le=2.0, description="音量。省略時はプリセット→デフォルト(1.0)の順で適用（0.0〜2.0）")
+    tempo_dynamics: Optional[float] = Field(None, ge=0.0, le=2.0, description="緩急。省略時はプリセット→デフォルト(1.0)の順で適用（0.0〜2.0）")
     pause_length: Optional[float] = Field(None, ge=0.0, description="句読点などの無音時間（秒）。Noneで自動（デフォルト）")
-    pause_length_scale: float = Field(1.0, ge=0.0, description="句読点などの無音時間の倍率。1.0が標準")
+    pause_length_scale: Optional[float] = Field(None, ge=0.0, description="無音倍率。省略時はプリセット→デフォルト(1.0)の順で適用")
 
 
 class SpeakerStyle(BaseModel):
@@ -198,20 +202,45 @@ async def speak(req: SpeakRequest):
     if processed_text != req.text:
         logger.info("テキスト置換: %r → %r", req.text, processed_text)
 
+    # パラメータ解決: リクエスト値 → プリセット値 → デフォルト値
+    preset = presets.get(req.speaker_id) or {}
+
+    def resolve(field_val, key: str):
+        if field_val is not None:
+            return field_val
+        if key in preset:
+            return preset[key]
+        return _SPEAK_DEFAULTS[key]
+
+    speed            = resolve(req.speed,              "speed")
+    pitch            = resolve(req.pitch,              "pitch")
+    intonation       = resolve(req.intonation,         "intonation")
+    volume           = resolve(req.volume,             "volume")
+    tempo_dynamics   = resolve(req.tempo_dynamics,     "tempo_dynamics")
+    pause_length_scale = resolve(req.pause_length_scale, "pause_length_scale")
+    pause_length     = req.pause_length  # Noneのまま渡す（プリセット対象外）
+
+    if preset:
+        logger.debug(
+            "Preset applied for speaker %d: speed=%.2f pitch=%.2f intonation=%.2f "
+            "volume=%.2f tempo_dynamics=%.2f pause_length_scale=%.2f",
+            req.speaker_id, speed, pitch, intonation, volume, tempo_dynamics, pause_length_scale,
+        )
+
     try:
         query = await backend.client.audio_query(processed_text, req.speaker_id)
     except Exception as exc:
         logger.error("audio_query failed: %s", exc)
         raise HTTPException(status_code=502, detail="音声クエリの生成に失敗しました")
 
-    query["speedScale"] = req.speed
-    query["pitchScale"] = req.pitch
-    query["intonationScale"] = req.intonation
-    query["volumeScale"] = req.volume
-    query["tempoDynamicsScale"] = req.tempo_dynamics
-    query["pauseLengthScale"] = req.pause_length_scale
-    if req.pause_length is not None:
-        query["pauseLength"] = req.pause_length
+    query["speedScale"] = speed
+    query["pitchScale"] = pitch
+    query["intonationScale"] = intonation
+    query["volumeScale"] = volume
+    query["tempoDynamicsScale"] = tempo_dynamics
+    query["pauseLengthScale"] = pause_length_scale
+    if pause_length is not None:
+        query["pauseLength"] = pause_length
 
     try:
         wav_bytes = await backend.client.synthesis(req.speaker_id, query)
