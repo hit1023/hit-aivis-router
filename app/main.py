@@ -221,7 +221,7 @@ async def speak(req: SpeakRequest):
     pause_length     = req.pause_length  # Noneのまま渡す（プリセット対象外）
 
     if preset:
-        logger.debug(
+        logger.info(
             "Preset applied for speaker %d: speed=%.2f pitch=%.2f intonation=%.2f "
             "volume=%.2f tempo_dynamics=%.2f pause_length_scale=%.2f",
             req.speaker_id, speed, pitch, intonation, volume, tempo_dynamics, pause_length_scale,
