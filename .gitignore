@@ -5,3 +5,5 @@
 __pycache__/
 *.pyc
 .claude/
+# text_replacements は name.txt から初回起動時に自動生成されるため管理不要
+data/text_replacements.json

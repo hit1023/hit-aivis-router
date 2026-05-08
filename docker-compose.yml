@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     volumes:
-      - aivis_data:/data
+      - ./data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -14,7 +14,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-volumes:
-  aivis_data:
-    name: aivis-router-data
