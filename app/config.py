@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     text_replacements_file: str = "/data/text_replacements.json"
+    speaker_presets_file: str = "/data/speaker_presets.json"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .audio import wav_to_mp3
 from .backend_pool import BackendPool
 from .config import settings
+from .speaker_preset import SpeakerPresetManager
 from .text_replacer import TextReplacer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 pool: BackendPool
 replacer: TextReplacer
+presets: SpeakerPresetManager
 
 _DESCRIPTION = """
 ## 概要
@@ -47,8 +49,9 @@ AivisSpeech Engine のシンプルなラッパー API です。
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool, replacer
+    global pool, replacer, presets
     replacer = TextReplacer(Path(settings.text_replacements_file), seed_file=Path("/srv/name.txt"))
+    presets = SpeakerPresetManager(Path(settings.speaker_presets_file))
     pool = BackendPool(settings.backend_urls, idle_timeout=settings.model_idle_timeout)
     try:
         await pool.initialize()
@@ -362,6 +365,90 @@ async def uninstall_model(aivm_uuid: str):
 )
 async def health():
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# スピーカープリセット
+# ---------------------------------------------------------------------------
+
+class SpeakerPresetParams(BaseModel):
+    """スピーカーに紐づく音声パラメータのプリセット。"""
+    model_config = {"json_schema_extra": {
+        "example": {
+            "speed": 1.0,
+            "pitch": 0.0,
+            "intonation": 1.0,
+            "volume": 1.0,
+            "tempo_dynamics": 1.0,
+            "pause_length": None,
+            "pause_length_scale": 1.0,
+        }
+    }}
+
+    speed: float = Field(1.0, ge=0.5, le=2.0, description="話速（0.5〜2.0）")
+    pitch: float = Field(0.0, ge=-0.15, le=0.15, description="音高（-0.15〜0.15）")
+    intonation: float = Field(1.0, ge=0.0, le=2.0, description="抑揚（0.0〜2.0）")
+    volume: float = Field(1.0, ge=0.0, le=2.0, description="音量（0.0〜2.0）")
+    tempo_dynamics: float = Field(1.0, ge=0.0, le=2.0, description="緩急（0.0〜2.0）")
+    pause_length: Optional[float] = Field(None, ge=0.0, description="無音秒数（Noneで自動）")
+    pause_length_scale: float = Field(1.0, ge=0.0, description="無音倍率")
+
+
+@app.get(
+    "/speaker_presets",
+    summary="スピーカープリセット一覧の取得",
+    description="""
+スピーカーIDをキーとして登録されているパラメータプリセットの一覧を返します。
+
+スピーカーIDは `/speakers` で確認できます。
+""",
+    tags=["スピーカープリセット"],
+)
+async def get_speaker_presets() -> dict:
+    return presets.get_all()
+
+
+@app.get(
+    "/speaker_presets/{speaker_id}",
+    summary="スピーカープリセットの取得",
+    description="指定したスピーカーIDのプリセットを返します。登録がない場合は404を返します。",
+    tags=["スピーカープリセット"],
+)
+async def get_speaker_preset(speaker_id: int) -> SpeakerPresetParams:
+    p = presets.get(speaker_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="プリセットが登録されていません")
+    return SpeakerPresetParams(**p)
+
+
+@app.put(
+    "/speaker_presets/{speaker_id}",
+    summary="スピーカープリセットの保存",
+    description="""
+指定したスピーカーIDにパラメータプリセットを保存します。
+
+既にプリセットが存在する場合は上書きします。
+プリセットは `/data/speaker_presets.json` に永続化されます。
+""",
+    tags=["スピーカープリセット"],
+)
+async def save_speaker_preset(speaker_id: int, req: SpeakerPresetParams) -> SpeakerPresetParams:
+    presets.set(speaker_id, req.model_dump())
+    return req
+
+
+@app.delete(
+    "/speaker_presets/{speaker_id}",
+    status_code=204,
+    summary="スピーカープリセットの削除",
+    description="指定したスピーカーIDのプリセットを削除します。",
+    tags=["スピーカープリセット"],
+)
+async def delete_speaker_preset(speaker_id: int) -> Response:
+    found = presets.delete(speaker_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="プリセットが登録されていません")
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
