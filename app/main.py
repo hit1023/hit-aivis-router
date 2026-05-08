@@ -326,6 +326,34 @@ async def force_unload_model(aivm_uuid: str):
     }
 
 
+@app.delete(
+    "/models/{aivm_uuid}/uninstall",
+    summary="モデルをアンインストール",
+    description="""
+指定したモデルを全バックエンドサーバーからアンインストールします。
+
+- アンインストール前に自動でVRAMからアンロードされます
+- 複数バックエンドがある場合は全台から削除します
+- この操作は取り消せません
+""",
+    tags=["モデル管理"],
+)
+async def uninstall_model(aivm_uuid: str):
+    try:
+        results = await pool.uninstall_model(aivm_uuid)
+    except Exception as exc:
+        logger.error("uninstall failed: %s", exc)
+        raise HTTPException(status_code=502, detail="アンインストールに失敗しました")
+    failed = [r for r in results if not r["success"]]
+    if len(failed) == len(results):
+        raise HTTPException(status_code=502, detail="全バックエンドでアンインストールに失敗しました")
+    return {
+        "aivm_uuid": aivm_uuid,
+        "results": results,
+        "message": f"{len(results) - len(failed)}/{len(results)} バックエンドからアンインストールしました",
+    }
+
+
 @app.get(
     "/health",
     summary="ヘルスチェック",

@@ -77,6 +77,20 @@ class BackendPool:
                 })
         return results
 
+    async def uninstall_model(self, aivm_uuid: str) -> list[dict]:
+        """指定UUIDのモデルを全バックエンドからアンインストールする。"""
+        results = []
+        for b in self._backends:
+            try:
+                await b.client.uninstall_model(aivm_uuid)
+                results.append({"backend_url": b.url, "success": True})
+                logger.info("Model %s uninstalled from %s", aivm_uuid, b.url)
+            except Exception as exc:
+                results.append({"backend_url": b.url, "success": False, "error": str(exc)})
+                logger.error("Model uninstall failed on %s: %s", b.url, exc)
+        await asyncio.gather(*(b.manager.refresh() for b in self._backends), return_exceptions=True)
+        return results
+
     async def install_model(self, filename: str, data: bytes) -> list[dict]:
         """aivmxファイルを全バックエンドにインストールする。各バックエンドの結果を返す。"""
         results = []

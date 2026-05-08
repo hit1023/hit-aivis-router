@@ -108,6 +108,14 @@ class AivisClient:
         )
         r.raise_for_status()
 
+    async def uninstall_model(self, aivm_uuid: str) -> None:
+        """指定UUIDのモデルをアンインストールする。"""
+        r = await self._client.delete(
+            f"{self.base_url}/aivm_models/{aivm_uuid}/uninstall",
+            timeout=60.0,
+        )
+        r.raise_for_status()
+
     async def install_model(self, filename: str, data: bytes) -> None:
         """aivmxファイルをAIVISサーバーにアップロードしてインストール。"""
         r = await self._client.post(
