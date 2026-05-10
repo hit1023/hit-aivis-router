@@ -396,6 +396,27 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post(
+    "/audio_query",
+    summary="アクセント句の取得",
+    description="テキストの音声クエリ（アクセント句・ピッチ情報）を返します。アクセント可視化に使用できます。",
+    tags=["情報取得"],
+)
+async def audio_query_endpoint(text: str, speaker_id: int):
+    backend = pool.next()
+    try:
+        await backend.manager.ensure_loaded(speaker_id)
+    except Exception:
+        pass
+    processed_text = replacer.apply(text)
+    try:
+        query = await backend.client.audio_query(processed_text, speaker_id)
+        return query
+    except Exception as exc:
+        logger.error("audio_query failed: %s", exc)
+        raise HTTPException(status_code=502, detail="音声クエリの生成に失敗しました")
+
+
 # ---------------------------------------------------------------------------
 # スピーカープリセット
 # ---------------------------------------------------------------------------
