@@ -16,12 +16,13 @@ show_menu() {
   echo "  ║     AIVIS Router  管理メニュー   ║"
   echo "  ╚══════════════════════════════════╝"
   echo -e "${RESET}"
-  echo -e "  ${BOLD}1.${RESET}  ${GREEN}ビルド & 起動${RESET}   ${GRAY}(down → build → up)${RESET}"
-  echo -e "  ${BOLD}2.${RESET}  ${GREEN}起動${RESET}            ${GRAY}(up -d)${RESET}"
-  echo -e "  ${BOLD}3.${RESET}  ${YELLOW}再起動${RESET}          ${GRAY}(restart)${RESET}"
-  echo -e "  ${BOLD}4.${RESET}  ${RED}停止${RESET}            ${GRAY}(down)${RESET}"
-  echo -e "  ${BOLD}5.${RESET}  ${BLUE}ログを見る${RESET}      ${GRAY}(logs -f)${RESET}"
-  echo -e "  ${BOLD}6.${RESET}  ${BLUE}状態を確認${RESET}      ${GRAY}(ps)${RESET}"
+  echo -e "  ${BOLD}1.${RESET}  ${GREEN}更新 & 起動${RESET}     ${GRAY}(pull → down → build → up)${RESET}"
+  echo -e "  ${BOLD}2.${RESET}  ${GREEN}ビルド & 起動${RESET}   ${GRAY}(down → build → up)${RESET}"
+  echo -e "  ${BOLD}3.${RESET}  ${GREEN}起動${RESET}            ${GRAY}(up -d)${RESET}"
+  echo -e "  ${BOLD}4.${RESET}  ${YELLOW}再起動${RESET}          ${GRAY}(restart)${RESET}"
+  echo -e "  ${BOLD}5.${RESET}  ${RED}停止${RESET}            ${GRAY}(down)${RESET}"
+  echo -e "  ${BOLD}6.${RESET}  ${BLUE}ログを見る${RESET}      ${GRAY}(logs -f)${RESET}"
+  echo -e "  ${BOLD}7.${RESET}  ${BLUE}状態を確認${RESET}      ${GRAY}(ps)${RESET}"
   echo -e "  ${BOLD}0.${RESET}  終了"
   echo ""
   echo -ne "  番号を選択 → "
@@ -33,7 +34,8 @@ while true; do
 
   case $choice in
     1)
-      echo -e "\n${GREEN}▶ ビルド & 起動${RESET}"
+      echo -e "\n${GREEN}▶ 更新 & 起動${RESET}"
+      git pull
       docker compose down
       docker compose up -d --build
       echo -e "${GREEN}✓ 完了${RESET}"
@@ -41,31 +43,39 @@ while true; do
       read -r
       ;;
     2)
+      echo -e "\n${GREEN}▶ ビルド & 起動${RESET}"
+      docker compose down
+      docker compose up -d --build
+      echo -e "${GREEN}✓ 完了${RESET}"
+      echo -e "${GRAY}Enterで戻る...${RESET}"
+      read -r
+      ;;
+    3)
       echo -e "\n${GREEN}▶ 起動${RESET}"
       docker compose up -d
       echo -e "${GREEN}✓ 完了${RESET}"
       echo -e "${GRAY}Enterで戻る...${RESET}"
       read -r
       ;;
-    3)
+    4)
       echo -e "\n${YELLOW}▶ 再起動${RESET}"
       docker compose restart
       echo -e "${GREEN}✓ 完了${RESET}"
       echo -e "${GRAY}Enterで戻る...${RESET}"
       read -r
       ;;
-    4)
+    5)
       echo -e "\n${RED}▶ 停止${RESET}"
       docker compose down
       echo -e "${GREEN}✓ 完了${RESET}"
       echo -e "${GRAY}Enterで戻る...${RESET}"
       read -r
       ;;
-    5)
+    6)
       echo -e "\n${BLUE}▶ ログ表示 ${GRAY}(Ctrl+C で戻る)${RESET}\n"
       docker compose logs -f
       ;;
-    6)
+    7)
       echo -e "\n${BLUE}▶ 状態確認${RESET}\n"
       docker compose ps
       echo -e "\n${GRAY}Enterで戻る...${RESET}"
