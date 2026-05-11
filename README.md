@@ -13,6 +13,7 @@ AivisSpeech Engine のシンプルなラッパー API です。
 - **モデル管理** — `.aivmx` ファイルのインストール・アンインストール・強制アンロードをAPIで操作可能
 - **ユーザー辞書** — 固有名詞や読み方を辞書登録して音声合成精度を向上
 - **テキスト前処理** — 音声合成前にテキストを置換するルールを登録（英字固有名詞の誤読対策に有効）
+- **発話履歴** — 全TTS合成を自動記録（SQLite）。話者・テキスト・パラメータをページネーション付きで参照可能
 
 ---
 
@@ -49,6 +50,7 @@ cp .env.example .env
 | `MP3_BITRATE` | `192k` | MP3の出力ビットレート |
 | `HOST` | `0.0.0.0` | リッスンするホストアドレス |
 | `PORT` | `8000` | リッスンするポート番号 |
+| `SPEECH_HISTORY_DB` | `/data/speech_history.db` | 発話履歴SQLiteファイルのパス |
 
 複数バックエンドの例：
 ```env
@@ -211,6 +213,77 @@ POST /text_replacements
 
 ---
 
+### テキスト置換ルールの一括インポート
+
+```
+POST /text_replacements/import
+```
+
+`src@dst` 形式のテキストファイルを `multipart/form-data` でアップロードし、ルールを一括 UPSERT します。
+
+```bash
+curl -X POST http://localhost:8000/text_replacements/import \
+  -F "file=@name.txt"
+```
+
+**ファイル形式：** 1行1ルール、`置換前@置換後`
+
+```
+Mumon@ミューモン
+Claude@クロード
+```
+
+**レスポンス例：**
+```json
+{"inserted": 2, "updated": 1}
+```
+
+---
+
+### 発話履歴
+
+```
+GET /history?page=1&per_page=20&speaker_id=888753760
+```
+
+記録されたTTS発話の一覧を返します。新しい順にページネーション。
+
+| パラメータ | 型 | 説明 |
+|-----------|-----|------|
+| `page` | int | ページ番号（1始まり、デフォルト: 1） |
+| `per_page` | int | 1ページあたりの件数（デフォルト: 20） |
+| `speaker_id` | int\|null | 話者IDでフィルタリング（省略時は全話者） |
+
+**レスポンス例：**
+```json
+{
+  "total": 42,
+  "page": 1,
+  "per_page": 20,
+  "items": [
+    {
+      "id": 42,
+      "created_at": "2026-05-11T12:34:56",
+      "speaker_id": 888753760,
+      "speaker_name": "Anneli（ノーマル）",
+      "original_text": "こんにちは",
+      "processed_text": "こんにちは",
+      "speed": 1.0,
+      "pitch": 0.0,
+      "intonation": 1.0,
+      "volume": 1.0,
+      "tempo_dynamics": 1.0,
+      "pause_length": null,
+      "pause_length_scale": 1.0
+    }
+  ]
+}
+```
+
+履歴は `/speak` 実行後に非同期で記録され（`asyncio.create_task`）、TTS レスポンス速度に影響しません。
+
+---
+
 ### アクセント句の取得
 
 ```
@@ -281,10 +354,18 @@ AIVIS Router (FastAPI)
 - `ModelManager` — バックエンドごとのモデルロード状態とアイドルタイムアウトを管理
 - `AivisClient` — AivisSpeech Engine の HTTP API クライアント
 - `TextReplacer` — 音声合成前テキスト前処理（最長マッチ優先の文字列置換）
+- `SpeechHistory` — 発話履歴のSQLite非同期書き込み・ページネーション検索
 
 ---
 
 ## 更新履歴
+
+### 2026-05 発話履歴・テキスト置換一括インポートの追加
+- `GET /history` エンドポイントを追加（ページネーション・話者IDフィルタ対応）
+- `/speak` 実行後に非同期でSQLiteへ記録（`asyncio.create_task` + `run_in_executor`）
+- `POST /text_replacements/import` エンドポイントを追加（`src@dst` 形式ファイルを一括UPSERT）
+- `SpeechHistory` モジュールを追加（`app/speech_history.py`）
+- `SPEECH_HISTORY_DB` 環境変数でDBパスを設定可能
 
 ### 2026-05 アクセント句取得エンドポイントの追加・運用改善
 - `POST /audio_query` エンドポイントを追加（WebUIのピッチ曲線表示用）
