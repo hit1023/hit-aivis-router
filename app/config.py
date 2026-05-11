@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     port: int = 8000
     text_replacements_file: str = "/data/text_replacements.json"
     speaker_presets_file: str = "/data/speaker_presets.json"
+    speech_history_db: str = "/data/speech_history.db"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

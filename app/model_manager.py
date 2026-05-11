@@ -20,6 +20,8 @@ class ModelManager:
         self._lock = asyncio.Lock()
         # style_id (int) -> aivm_uuid
         self._style_to_model: dict[int, str] = {}
+        # style_id (int) -> "スピーカー名（スタイル名）"
+        self._style_names: dict[int, str] = {}
         # aivm_uuid -> is_loaded
         self._loaded: dict[str, bool] = {}
         # aivm_uuid -> last used timestamp
@@ -44,16 +46,19 @@ class ModelManager:
                 if s_uuid:
                     uuid_to_model[s_uuid] = aivm_uuid
 
-        # style_id → aivm_uuid  (/speakers uses "speaker_uuid")
+        # style_id → aivm_uuid / name  (/speakers uses "speaker_uuid")
         for speaker in speakers:
             s_uuid = speaker.get("speaker_uuid", "")
             aivm_uuid = uuid_to_model.get(s_uuid)
-            if aivm_uuid is None:
-                continue
+            spk_name = speaker.get("name", "")
             for style in speaker.get("styles", []):
                 sid = style.get("id")
-                if sid is not None:
+                if sid is None:
+                    continue
+                if aivm_uuid is not None:
                     self._style_to_model[sid] = aivm_uuid
+                style_name = style.get("name", "")
+                self._style_names[sid] = f"{spk_name}（{style_name}）" if style_name else spk_name
 
     def get_model_uuid(self, speaker_id: int) -> Optional[str]:
         return self._style_to_model.get(speaker_id)

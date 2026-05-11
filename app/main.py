@@ -18,6 +18,7 @@ from .backend_pool import BackendPool
 from .config import settings
 from .speaker_preset import SpeakerPresetManager
 from .text_replacer import TextReplacer
+from . import speech_history
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ AivisSpeech Engine のシンプルなラッパー API です。
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pool, replacer, presets
+    speech_history.init(Path(settings.speech_history_db))
     replacer = TextReplacer(Path(settings.text_replacements_file), seed_file=Path("/srv/name.txt"))
     presets = SpeakerPresetManager(Path(settings.speaker_presets_file))
     pool = BackendPool(settings.backend_urls, idle_timeout=settings.model_idle_timeout)
@@ -249,6 +251,21 @@ async def speak(req: SpeakRequest):
         raise HTTPException(status_code=502, detail="音声合成に失敗しました")
 
     mp3_bytes = wav_to_mp3(wav_bytes, bitrate=settings.mp3_bitrate)
+
+    asyncio.create_task(speech_history.record(
+        speaker_id=req.speaker_id,
+        speaker_name=pool.resolve_speaker_name(req.speaker_id),
+        original_text=req.text,
+        processed_text=processed_text,
+        speed=speed,
+        pitch=pitch,
+        intonation=intonation,
+        volume=volume,
+        tempo_dynamics=tempo_dynamics,
+        pause_length=pause_length,
+        pause_length_scale=pause_length_scale,
+    ))
+
     return Response(content=mp3_bytes, media_type="audio/mpeg")
 
 
@@ -774,3 +791,34 @@ async def delete_text_replacement(
     if not found:
         raise HTTPException(status_code=404, detail="指定された置換ルールが見つかりません")
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# 音声合成履歴
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/history",
+    summary="音声合成履歴の取得",
+    description="""
+音声合成リクエストの履歴を最新順で返します。
+
+- `page`: ページ番号（1始まり）
+- `per_page`: 1ページあたりの件数（最大100）
+- `speaker_id`: スピーカーIDでフィルタリング（省略時は全件）
+""",
+    tags=["履歴"],
+)
+async def get_history(
+    page: int = Query(1, ge=1, description="ページ番号"),
+    per_page: int = Query(20, ge=1, le=100, description="1ページの件数"),
+    speaker_id: Optional[int] = Query(None, description="スピーカーIDでフィルタ"),
+) -> dict:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        speech_history.fetch_page,
+        page,
+        per_page,
+        speaker_id,
+    )
