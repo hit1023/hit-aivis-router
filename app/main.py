@@ -793,6 +793,54 @@ async def delete_text_replacement(
     return Response(status_code=204)
 
 
+@app.post(
+    "/text_replacements/import",
+    summary="テキスト置換ルールをファイルからインポート（UPSERT）",
+    description="""
+`src@dst` 形式のテキストファイルを受け取り、置換ルールを一括でUPSERTします。
+
+- 既存の `src` を持つルールは上書きされます
+- 新規の `src` は追加されます
+- `@` を含まない行はスキップされます
+- ファイルのエンコーディングは UTF-8 を想定しています
+""",
+    tags=["テキスト置換"],
+)
+async def import_text_replacements(file: UploadFile = File(...)) -> dict:
+    try:
+        content = (await file.read()).decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=422, detail="ファイルはUTF-8エンコーディングである必要があります")
+
+    rules: dict[str, str] = {}
+    skipped = 0
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "@" not in line:
+            skipped += 1
+            continue
+        src, _, dst = line.partition("@")
+        src = src.strip()
+        dst = dst.strip()
+        if not src:
+            skipped += 1
+            continue
+        rules[src] = dst
+
+    if not rules:
+        raise HTTPException(status_code=422, detail="有効なルールが1件も見つかりませんでした")
+
+    inserted, updated = replacer.upsert_many(rules)
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"{inserted} 件追加、{updated} 件更新、{skipped} 行スキップしました",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 音声合成履歴
 # ---------------------------------------------------------------------------

@@ -83,6 +83,23 @@ class TextReplacer:
         self._save()
         return True
 
+    def upsert_many(self, rules: dict[str, str]) -> tuple[int, int]:
+        """複数ルールをUPSERT（追加 or 上書き）して保存する。
+        Returns (inserted, updated) counts.
+        """
+        inserted = updated = 0
+        for src, dst in rules.items():
+            if not src:
+                continue
+            if src in self._rules:
+                updated += 1
+            else:
+                inserted += 1
+            self._rules[src] = dst
+        if inserted + updated:
+            self._save()
+        return inserted, updated
+
     def get_all(self) -> dict[str, str]:
         """全ルールのコピーを返す。"""
         return dict(self._rules)
