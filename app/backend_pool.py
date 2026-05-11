@@ -2,6 +2,7 @@ import asyncio
 import itertools
 import logging
 from dataclasses import dataclass, field
+from typing import Optional
 
 from .aivis_client import AivisClient
 from .model_manager import ModelManager
@@ -32,6 +33,9 @@ class BackendPool:
 
     def next(self) -> Backend:
         return next(self._cycle)
+
+    def resolve_speaker_name(self, speaker_id: int) -> Optional[str]:
+        return self._backends[0].manager._style_names.get(speaker_id) if self._backends else None
 
     async def initialize(self) -> None:
         await asyncio.gather(*(b.manager.refresh() for b in self._backends))
