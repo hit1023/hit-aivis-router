@@ -6,19 +6,22 @@ AivisSpeechの読みと比較して正誤を判定する。
 """
 import json
 import logging
+import re
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
-以下の日本語単語を正しいカタカナで読んでください。
-医療・美容・IT・ビジネスなどの専門用語が含まれます。
+日本語の単語リストをカタカナ読みに変換してください。
 
-JSON配列のみを返してください（前後の説明文不要）：
-[
-  {"text": "単語", "reading": "カタカナヨミ"}
-]
+ルール：
+- readingはカタカナのみ（漢字・ひらがな・スペース・句読点は絶対に使わない）
+- JSON配列のみを返す（前後の説明文・コードブロック不要）
+
+例：
+入力：[{"text": "眼瞼下垂"}, {"text": "豊胸手術"}, {"text": "脂肪吸引"}]
+出力：[{"text": "眼瞼下垂", "reading": "ガンケンカスイ"}, {"text": "豊胸手術", "reading": "ホウキョウシュジュツ"}, {"text": "脂肪吸引", "reading": "シボウキュウイン"}]
 """
 
 # AivisSpeechはオウ→オオ などの長音音便表記をするため正規化して比較する
@@ -34,8 +37,15 @@ _NORMALIZE_TABLE = [
 ]
 
 
+def _clean_reading(text: str) -> str:
+    """LLMの読みからカタカナ・長音以外を除去しスペースも削除する。"""
+    text = text.replace(' ', '').replace('　', '')
+    return re.sub(r'[^゠-ヿ]', '', text)  # カタカナ範囲のみ残す
+
+
 def _normalize(kana: str) -> str:
-    """長音の音便揺れを統一して比較用に正規化する。"""
+    """長音の音便揺れを統一して比較用に正規化する（スペースも除去）。"""
+    kana = kana.replace(' ', '').replace('　', '')
     for src, dst in _NORMALIZE_TABLE:
         kana = kana.replace(src, dst)
     return kana
@@ -94,7 +104,8 @@ async def verify_readings(
     kana_map = {p["text"]: p["kana"] for p in pairs}
     results = []
     for r in llm_results:
-        llm_reading = r.get("reading", "")
+        raw_reading = r.get("reading", "")
+        llm_reading = _clean_reading(raw_reading)  # 漢字・スペース除去
         aivis_kana = kana_map.get(r["text"], "")
         correct = _normalize(llm_reading) == _normalize(aivis_kana)
         results.append({"text": r["text"], "reading": llm_reading, "correct": correct})
