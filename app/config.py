@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     text_replacements_file: str = "/data/text_replacements.json"
+    compound_splits_file: str = "/data/compound_splits.json"
     speaker_presets_file: str = "/data/speaker_presets.json"
     speech_history_db: str = "/data/speech_history.db"
     llm_api_url: str = "http://localhost:11434/v1"

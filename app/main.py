@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -523,6 +524,23 @@ async def delete_speaker_preset(speaker_id: int) -> Response:
 # ユーザー辞書
 # ---------------------------------------------------------------------------
 
+def _load_compound_splits() -> dict[str, list[str]]:
+    """複合語の表層形分割情報を読み込む。{結合表層形: [分割リスト]} 形式。"""
+    path = Path(settings.compound_splits_file)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_compound_splits(splits: dict[str, list[str]]) -> None:
+    path = Path(settings.compound_splits_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(splits, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 class WordType(str, Enum):
     """品詞の種別。"""
     PROPER_NOUN = "PROPER_NOUN"
@@ -632,6 +650,18 @@ async def get_user_dict(enable_compound_accent: bool = False) -> dict:
     except Exception as exc:
         logger.error("get_user_dict failed: %s", exc)
         raise HTTPException(status_code=502, detail="ユーザー辞書の取得に失敗しました")
+
+
+@app.get(
+    "/user_dict/compound_splits",
+    summary="複合語の表層形分割情報を取得",
+    tags=["ユーザー辞書"],
+)
+async def get_compound_splits() -> dict:
+    """インポート時に保存した複合語の表層形分割情報を返す。
+    キー: 結合表層形（例: "新田真剣佑"）、値: 分割リスト（例: ["新田", "真剣佑"]）
+    """
+    return _load_compound_splits()
 
 
 @app.post(
@@ -858,6 +888,13 @@ async def import_user_dict(file: UploadFile = File(...)) -> dict:
                 inserted += 1
         except Exception as exc:
             errors.append({"row": surface_key, "reason": str(exc)})
+
+    # 複合語の表層形分割情報を保存
+    splits = _load_compound_splits()
+    for r in rows:
+        if len(r["surface"]) > 1:
+            splits["".join(r["surface"])] = r["surface"]
+    _save_compound_splits(splits)
 
     return {"inserted": inserted, "updated": updated, "errors": errors}
 
