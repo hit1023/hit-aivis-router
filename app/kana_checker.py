@@ -21,9 +21,11 @@ _SYSTEM_PROMPT = """\
 
 入力されたJSONの各要素を判定し、必ず以下のJSON配列のみを返してください（前後の説明文不要）：
 [
-  {"text": "単語", "correct": true},
-  {"text": "単語2", "correct": false, "suggested": "正シイヨミ", "note": "補足説明"}
+  {"text": "単語", "reading": "LLMが考える正しい読み（カタカナ）", "correct": true},
+  {"text": "単語2", "reading": "セイシイヨミ", "correct": false, "note": "補足説明"}
 ]
+
+`reading` は正誤に関わらず必ず返してください。
 """
 
 
