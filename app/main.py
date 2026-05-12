@@ -19,6 +19,7 @@ from .config import settings
 from .speaker_preset import SpeakerPresetManager
 from .text_replacer import TextReplacer
 from . import speech_history
+from . import kana_checker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -870,3 +871,54 @@ async def get_history(
         per_page,
         speaker_id,
     )
+
+
+# ------------------------------------------------------------------
+# 読みチェック LLM判定
+# ------------------------------------------------------------------
+
+class KanaVerifyItem(BaseModel):
+    text: str
+    kana: str
+
+
+@app.get(
+    "/kana_verify/status",
+    summary="LLM読み判定の設定状態",
+    tags=["読みチェック"],
+)
+async def kana_verify_status() -> dict:
+    return {
+        "enabled": bool(settings.llm_model),
+        "model": settings.llm_model or None,
+        "api_url": settings.llm_api_url,
+    }
+
+
+@app.post(
+    "/kana_verify",
+    summary="LLMで読みの正誤を判定",
+    description="""
+単語とカナ読みのペアをLLMに渡し、読みが正しいか一括判定します。
+
+`LLM_MODEL` 環境変数が未設定の場合は 503 を返します。
+""",
+    tags=["読みチェック"],
+)
+async def kana_verify_endpoint(items: list[KanaVerifyItem]) -> list[dict]:
+    if not settings.llm_model:
+        raise HTTPException(
+            503,
+            detail="LLMが設定されていません。LLM_MODEL 環境変数にモデル名を設定してください（例: gemma3）",
+        )
+    try:
+        results = await kana_checker.verify_readings(
+            [{"text": it.text, "kana": it.kana} for it in items],
+            api_url=settings.llm_api_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+        )
+        return results
+    except Exception as exc:
+        logger.error("kana_verify failed: %s", exc)
+        raise HTTPException(500, detail=str(exc))
