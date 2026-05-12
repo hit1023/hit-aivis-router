@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+from fastapi import FastAPI, Form, HTTPException, Query, UploadFile, File
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
