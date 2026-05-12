@@ -173,14 +173,46 @@ POST /models/{aivm_uuid}/unload
 ### ユーザー辞書
 
 ```
-GET  /user_dict                  # 登録単語の一覧取得
-POST /user_dict                  # 単語を追加
-PUT  /user_dict/{word_uuid}      # 単語を更新
-DELETE /user_dict/{word_uuid}    # 単語を削除
+GET    /user_dict                  # 登録単語の一覧取得
+POST   /user_dict                  # 単語を追加
+PUT    /user_dict/{word_uuid}      # 単語を更新
+DELETE /user_dict/{word_uuid}      # 単語を削除
+POST   /user_dict/import           # CSVファイルから一括インポート（UPSERT）
+GET    /user_dict/compound_splits  # 複合語の表層形分割情報を取得
 ```
 
 日本語の読み方・アクセントをAivisSpeechのMeCab辞書に登録します。  
 **英字の単語はカタカナに変換されて保存されるため、英字固有名詞には後述のテキスト置換ルールを使用してください。**
+
+#### CSVファイルからの一括インポート
+
+`POST /user_dict/import` に UTF-8 CSV をアップロードして単語を一括登録できます。
+
+**CSVフォーマット：**
+```
+表層形,読み,アクセント,品詞,優先度
+東京スカイツリー,トウキョウスカイツリー,5,固有名詞,5
+堀田創,ホッタハジメ,3,人名,7
+新田|真剣佑,アラタ|マッケンユウ,1|3,人名,7
+```
+
+- `品詞` / `優先度` は省略可（デフォルト: 固有名詞 / 5）
+- 複合語は `|` で各形態素を区切る（表層形・読み・アクセントの要素数を一致させること）
+- 既存の同じ表層形の単語は上書き（UPSERT）
+
+#### Google スプレッドシートによる管理
+
+単語辞書・置換ルールは Google スプレッドシートで一元管理できます。  
+Apps Script 経由で API と双方向同期が可能です。
+
+📄 **管理スプレッドシート：** https://docs.google.com/spreadsheets/d/1eqyFFZGPusNO9Qx_dAVaLAkzUTvsb3vQNLV8altXxGU/edit?usp=sharing
+
+| メニュー | 説明 |
+|---------|------|
+| 単語辞書をAPIへ送る | シートの内容を API に UPSERT |
+| 単語辞書をAPIから取得 | API の現在の辞書をシートに反映 |
+| 置換ルールをAPIへ送る | シートの内容を API に送信（UPSERT or フルリプレース） |
+| 置換ルールをAPIから取得 | API の現在のルールをシートに反映 |
 
 ---
 
