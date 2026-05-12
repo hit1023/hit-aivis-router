@@ -83,6 +83,11 @@ class TextReplacer:
         self._save()
         return True
 
+    def replace_all(self, rules: dict[str, str]) -> tuple[int, int]:
+        """全ルールを削除して新しいルールで置き換える。Returns (inserted, updated=0)."""
+        self._rules = {}
+        return self.upsert_many(rules)
+
     def upsert_many(self, rules: dict[str, str]) -> tuple[int, int]:
         """複数ルールをUPSERT（追加 or 上書き）して保存する。
         Returns (inserted, updated) counts.

@@ -796,18 +796,20 @@ async def delete_text_replacement(
 
 @app.post(
     "/text_replacements/import",
-    summary="テキスト置換ルールをファイルからインポート（UPSERT）",
+    summary="テキスト置換ルールをファイルからインポート",
     description="""
-`src@dst` 形式のテキストファイルを受け取り、置換ルールを一括でUPSERTします。
+`src@dst` 形式のテキストファイルを受け取り、置換ルールをインポートします。
 
-- 既存の `src` を持つルールは上書きされます
-- 新規の `src` は追加されます
+- `mode=upsert`（デフォルト）: 既存ルールを保持しつつ追加・上書き
+- `mode=replace`: 既存ルールを**全削除**してファイルの内容で置き換え
 - `@` を含まない行はスキップされます
-- ファイルのエンコーディングは UTF-8 を想定しています
 """,
     tags=["テキスト置換"],
 )
-async def import_text_replacements(file: UploadFile = File(...)) -> dict:
+async def import_text_replacements(
+    file: UploadFile = File(...),
+    mode: str = Form("upsert"),
+) -> dict:
     try:
         content = (await file.read()).decode("utf-8")
     except UnicodeDecodeError:
@@ -833,7 +835,10 @@ async def import_text_replacements(file: UploadFile = File(...)) -> dict:
     if not rules:
         raise HTTPException(status_code=422, detail="有効なルールが1件も見つかりませんでした")
 
-    inserted, updated = replacer.upsert_many(rules)
+    if mode == "replace":
+        inserted, updated = replacer.replace_all(rules)
+    else:
+        inserted, updated = replacer.upsert_many(rules)
     return {
         "inserted": inserted,
         "updated": updated,
