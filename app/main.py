@@ -721,6 +721,146 @@ async def delete_user_dict_word(word_uuid: str) -> Response:
         raise HTTPException(status_code=502, detail="単語の削除に失敗しました")
     return Response(status_code=204)
 
+_WORD_TYPE_FROM_LABEL: dict[str, str] = {v: k for k, v in _WORD_TYPE_LABELS.items()}
+
+
+@app.post(
+    "/user_dict/import",
+    summary="ユーザー辞書をCSVファイルからインポート（UPSERT）",
+    description="""
+CSVファイルからユーザー辞書に単語を一括登録します。
+
+**CSVフォーマット（UTF-8）**:
+```
+表層形,読み,アクセント,品詞,優先度
+東京スカイツリー,トウキョウスカイツリー,5,固有名詞,5
+堀田創,ホッタハジメ,3,人名,7
+新田|真剣佑,アラタ|マッケンユウ,1|3,人名,7
+```
+
+- `品詞` と `優先度` は省略可能（デフォルト: 固有名詞 / 5）
+- 複合語は `|` で各形態素を区切る（表層形・読み・アクセントの要素数を一致させること）
+- 既存の同じ表層形を持つ単語は上書き（UPSERT）されます
+- `#` で始まる行と空行はスキップされます
+""",
+    tags=["ユーザー辞書"],
+)
+async def import_user_dict(file: UploadFile = File(...)) -> dict:
+    import csv
+    import io
+
+    try:
+        content = (await file.read()).decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=422, detail="ファイルのエンコーディングが UTF-8 ではありません")
+
+    rows: list[dict] = []
+    errors: list[dict] = []
+    header_skipped = False
+
+    for lineno, row in enumerate(csv.reader(io.StringIO(content)), start=1):
+        if not row or not any(c.strip() for c in row):
+            continue
+        first = row[0].strip()
+        if first.startswith("#"):
+            continue
+        if not header_skipped and first in ("表層形", "surface"):
+            header_skipped = True
+            continue
+
+        surface_raw = first
+        pron_raw    = row[1].strip() if len(row) > 1 else ""
+        accent_raw  = row[2].strip() if len(row) > 2 else ""
+        wtype_raw   = row[3].strip() if len(row) > 3 else ""
+        priority_raw = row[4].strip() if len(row) > 4 else ""
+
+        if not surface_raw or not pron_raw or not accent_raw:
+            errors.append({"row": lineno, "reason": "表層形・読み・アクセントは必須です"})
+            continue
+
+        surface_list = [s.strip() for s in surface_raw.split("|")]
+        pron_list    = [p.strip() for p in pron_raw.split("|")]
+        try:
+            accent_list = [int(a.strip()) for a in accent_raw.split("|")]
+        except ValueError:
+            errors.append({"row": lineno, "reason": f"アクセントが数値ではありません: {accent_raw}"})
+            continue
+
+        if not (len(surface_list) == len(pron_list) == len(accent_list)):
+            errors.append({
+                "row": lineno,
+                "reason": (
+                    f"表層形・読み・アクセントの要素数が一致しません "
+                    f"({len(surface_list)}/{len(pron_list)}/{len(accent_list)})"
+                ),
+            })
+            continue
+
+        if wtype_raw:
+            word_type = _WORD_TYPE_FROM_LABEL.get(wtype_raw) or (
+                wtype_raw if wtype_raw in _WORD_TYPE_LABELS else None
+            )
+            if word_type is None:
+                errors.append({"row": lineno, "reason": f"品詞が不明です: {wtype_raw}"})
+                continue
+        else:
+            word_type = WordType.PROPER_NOUN.value
+
+        try:
+            priority = max(0, min(10, int(priority_raw))) if priority_raw else 5
+        except ValueError:
+            priority = 5
+
+        rows.append({
+            "surface": surface_list,
+            "pronunciation": pron_list,
+            "accent_type": accent_list,
+            "word_type": word_type,
+            "priority": priority,
+        })
+
+    if not rows and not errors:
+        raise HTTPException(status_code=422, detail="有効な行が1件も見つかりませんでした")
+
+    try:
+        existing = await pool.get_user_dict(enable_compound_accent=False)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"既存辞書の取得に失敗しました: {exc}")
+
+    surface_to_uuid: dict[str, str] = {
+        w.get("surface", ""): uuid
+        for uuid, w in existing.items()
+        if w.get("surface")
+    }
+
+    inserted = updated = 0
+    for r in rows:
+        surface_key = "".join(r["surface"])
+        try:
+            if surface_key in surface_to_uuid:
+                await pool.update_user_dict_word(
+                    word_uuid=surface_to_uuid[surface_key],
+                    surface=r["surface"],
+                    pronunciation=r["pronunciation"],
+                    accent_type=r["accent_type"],
+                    word_type=r["word_type"],
+                    priority=r["priority"],
+                )
+                updated += 1
+            else:
+                await pool.add_user_dict_word(
+                    surface=r["surface"],
+                    pronunciation=r["pronunciation"],
+                    accent_type=r["accent_type"],
+                    word_type=r["word_type"],
+                    priority=r["priority"],
+                )
+                inserted += 1
+        except Exception as exc:
+            errors.append({"row": surface_key, "reason": str(exc)})
+
+    return {"inserted": inserted, "updated": updated, "errors": errors}
+
 
 # ---------------------------------------------------------------------------
 # テキスト置換ルール
