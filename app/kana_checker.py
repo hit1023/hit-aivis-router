@@ -1,8 +1,8 @@
 """
 LLMを使った日本語読みの正誤判定モジュール。
 
-OpenAI互換API（Ollama など）を呼び出し、単語とカナ読みのペアが
-正しいかどうかをバッチで判定する。
+OpenAI互換API（Ollama など）を呼び出し、単語のカナ読みをLLMに独立生成させ、
+AivisSpeechの読みと比較して正誤を判定する。
 """
 import json
 import logging
@@ -12,24 +12,33 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
-あなたは日本語の専門家です。単語とその読み（カタカナ）のペアについて、読みが正しいか判定してください。
-医療・美容・IT・ビジネスなどの専門用語が含まれる場合があります。
+以下の日本語単語を正しいカタカナで読んでください。
+医療・美容・IT・ビジネスなどの専門用語が含まれます。
 
-注意事項：
-- 「オウ→オオ」「ウウ→ウー」など長音の音便変化は正常なので正しいと判定してください
-- 同音異義語や複数の読みが存在する単語は、一般的な読みに合っていれば正しいと判定してください
-
-各要素について以下のJSON配列のみを返してください（前後の説明文不要）：
+JSON配列のみを返してください（前後の説明文不要）：
 [
-  {"text": "単語", "reading": "あなたが考える正しい読み（カタカナ）", "correct": true},
-  {"text": "単語2", "reading": "あなたが考える正しい読み（カタカナ）", "correct": false, "note": "補足説明"}
+  {"text": "単語", "reading": "カタカナヨミ"}
+]
+"""
+
+# AivisSpeechはオウ→オオ などの長音音便表記をするため正規化して比較する
+_NORMALIZE_TABLE = [
+    ('ジョオ', 'ジョウ'), ('ショオ', 'ショウ'), ('チョオ', 'チョウ'),
+    ('ニョオ', 'ニョウ'), ('ヒョオ', 'ヒョウ'), ('キョオ', 'キョウ'),
+    ('ミョオ', 'ミョウ'), ('リョオ', 'リョウ'), ('ギョオ', 'ギョウ'),
+    ('ビョオ', 'ビョウ'), ('ピョオ', 'ピョウ'),
+    ('オオ', 'オウ'), ('コオ', 'コウ'), ('ソオ', 'ソウ'), ('トオ', 'トウ'),
+    ('ノオ', 'ノウ'), ('ホオ', 'ホウ'), ('モオ', 'モウ'), ('ヨオ', 'ヨウ'),
+    ('ロオ', 'ロウ'), ('ゴオ', 'ゴウ'), ('ゾオ', 'ゾウ'), ('ドオ', 'ドウ'),
+    ('ボオ', 'ボウ'), ('ポオ', 'ポウ'),
 ]
 
-重要：
-- `reading` はあなた自身が判断した正しい読みを返してください。入力された `kana` をそのままコピーしないでください
-- `correct: false` の場合、`reading` は入力の `kana` と異なるはずです
-- `reading` は正誤に関わらず必ず返してください
-"""
+
+def _normalize(kana: str) -> str:
+    """長音の音便揺れを統一して比較用に正規化する。"""
+    for src, dst in _NORMALIZE_TABLE:
+        kana = kana.replace(src, dst)
+    return kana
 
 
 async def verify_readings(
@@ -39,15 +48,16 @@ async def verify_readings(
     model: str,
     timeout: float = 120.0,
 ) -> list[dict]:
-    """単語とカナ読みのペアをLLMで一括判定する。
+    """単語リストをLLMに独立して読ませ、AivisSpeechの読みと比較して正誤を返す。
 
     Args:
-        pairs: [{"text": "単語", "kana": "カナ"}, ...]
+        pairs: [{"text": "単語", "kana": "AivisSpeechの読み"}, ...]
     Returns:
-        [{"text": "単語", "correct": bool, "suggested": "...", "note": "..."}, ...]
+        [{"text": "単語", "reading": "LLMの読み", "correct": bool}, ...]
     """
+    # LLMには単語名だけ送る（AivisSpeechの読みは見せない）
     payload = json.dumps(
-        [{"text": p["text"], "kana": p["kana"]} for p in pairs],
+        [{"text": p["text"]} for p in pairs],
         ensure_ascii=False,
         indent=2,
     )
@@ -60,7 +70,7 @@ async def verify_readings(
                 "model": model,
                 "messages": [
                     {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": f"以下を判定してください：\n{payload}"},
+                    {"role": "user", "content": payload},
                 ],
                 "temperature": 0.1,
             },
@@ -78,6 +88,16 @@ async def verify_readings(
                 content = stripped
                 break
 
-    results: list[dict] = json.loads(content)
-    logger.info("kana_verify: %d pairs checked by LLM (%s)", len(results), model)
+    llm_results: list[dict] = json.loads(content)
+
+    # AivisSpeechの読みと正規化比較して correct を決定
+    kana_map = {p["text"]: p["kana"] for p in pairs}
+    results = []
+    for r in llm_results:
+        llm_reading = r.get("reading", "")
+        aivis_kana = kana_map.get(r["text"], "")
+        correct = _normalize(llm_reading) == _normalize(aivis_kana)
+        results.append({"text": r["text"], "reading": llm_reading, "correct": correct})
+
+    logger.info("kana_verify: %d words checked by LLM (%s)", len(results), model)
     return results
