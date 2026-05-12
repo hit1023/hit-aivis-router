@@ -695,6 +695,10 @@ async def add_user_dict_word(req: UserDictWordRequest) -> UserDictWordAdded:
     except Exception as exc:
         logger.error("add_user_dict_word failed: %s", exc)
         raise HTTPException(status_code=502, detail="単語の追加に失敗しました")
+    if len(req.surface) > 1:
+        splits = _load_compound_splits()
+        splits["".join(req.surface)] = req.surface
+        _save_compound_splits(splits)
     return UserDictWordAdded(word_uuid=word_uuid)
 
 
@@ -729,6 +733,10 @@ async def update_user_dict_word(word_uuid: str, req: UserDictWordRequest) -> Res
     except Exception as exc:
         logger.error("update_user_dict_word failed: %s", exc)
         raise HTTPException(status_code=502, detail="単語の更新に失敗しました")
+    if len(req.surface) > 1:
+        splits = _load_compound_splits()
+        splits["".join(req.surface)] = req.surface
+        _save_compound_splits(splits)
     return Response(status_code=204)
 
 
