@@ -52,7 +52,7 @@ async def verify_readings(
         indent=2,
     )
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
         resp = await client.post(
             f"{api_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
