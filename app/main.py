@@ -524,21 +524,47 @@ async def delete_speaker_preset(speaker_id: int) -> Response:
 # ユーザー辞書
 # ---------------------------------------------------------------------------
 
-def _load_compound_splits() -> dict[str, list[str]]:
-    """複合語の表層形分割情報を読み込む。{結合表層形: [分割リスト]} 形式。"""
+def _load_compound_splits() -> dict[str, dict]:
+    """複合語の分割情報を読み込む。
+    形式: {結合表層形: {"surface": [...], "pronunciation": [...], "accent_type": [...]}}
+    後方互換: 旧形式 {結合表層形: [...]} も自動変換する。
+    """
     path = Path(settings.compound_splits_file)
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # 旧形式（値がリスト）を新形式に変換
+        migrated = {}
+        for k, v in data.items():
+            if isinstance(v, list):
+                migrated[k] = {"surface": v}
+            else:
+                migrated[k] = v
+        return migrated
     except Exception:
         return {}
 
 
-def _save_compound_splits(splits: dict[str, list[str]]) -> None:
+def _save_compound_splits(splits: dict[str, dict]) -> None:
     path = Path(settings.compound_splits_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(splits, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _upsert_compound_split(
+    splits: dict[str, dict],
+    surface: list[str],
+    pronunciation: list[str],
+    accent_type: list[int],
+) -> None:
+    """複合語の分割情報を更新する（インプレース）。"""
+    key = "".join(surface)
+    splits[key] = {
+        "surface": surface,
+        "pronunciation": pronunciation,
+        "accent_type": accent_type,
+    }
 
 
 class WordType(str, Enum):
@@ -697,7 +723,7 @@ async def add_user_dict_word(req: UserDictWordRequest) -> UserDictWordAdded:
         raise HTTPException(status_code=502, detail="単語の追加に失敗しました")
     if len(req.surface) > 1:
         splits = _load_compound_splits()
-        splits["".join(req.surface)] = req.surface
+        _upsert_compound_split(splits, req.surface, req.pronunciation, req.accent_type)
         _save_compound_splits(splits)
     return UserDictWordAdded(word_uuid=word_uuid)
 
@@ -735,7 +761,7 @@ async def update_user_dict_word(word_uuid: str, req: UserDictWordRequest) -> Res
         raise HTTPException(status_code=502, detail="単語の更新に失敗しました")
     if len(req.surface) > 1:
         splits = _load_compound_splits()
-        splits["".join(req.surface)] = req.surface
+        _upsert_compound_split(splits, req.surface, req.pronunciation, req.accent_type)
         _save_compound_splits(splits)
     return Response(status_code=204)
 
@@ -752,11 +778,26 @@ async def update_user_dict_word(word_uuid: str, req: UserDictWordRequest) -> Res
     tags=["ユーザー辞書"],
 )
 async def delete_user_dict_word(word_uuid: str) -> Response:
+    # 削除前に surface を取得して compound_splits から除去する
+    try:
+        user_dict = await pool.get_user_dict(enable_compound_accent=False)
+        entry = user_dict.get(word_uuid)
+        surface_key = "".join(entry.get("surface", [])) if entry else None
+    except Exception:
+        surface_key = None
+
     try:
         await pool.delete_user_dict_word(word_uuid)
     except Exception as exc:
         logger.error("delete_user_dict_word failed: %s", exc)
         raise HTTPException(status_code=502, detail="単語の削除に失敗しました")
+
+    if surface_key:
+        splits = _load_compound_splits()
+        if surface_key in splits:
+            del splits[surface_key]
+            _save_compound_splits(splits)
+
     return Response(status_code=204)
 
 _WORD_TYPE_FROM_LABEL: dict[str, str] = {v: k for k, v in _WORD_TYPE_LABELS.items()}
@@ -897,11 +938,11 @@ async def import_user_dict(file: UploadFile = File(...)) -> dict:
         except Exception as exc:
             errors.append({"row": surface_key, "reason": str(exc)})
 
-    # 複合語の表層形分割情報を保存
+    # 複合語の分割情報を保存
     splits = _load_compound_splits()
     for r in rows:
         if len(r["surface"]) > 1:
-            splits["".join(r["surface"])] = r["surface"]
+            _upsert_compound_split(splits, r["surface"], r["pronunciation"], r["accent_type"])
     _save_compound_splits(splits)
 
     return {"inserted": inserted, "updated": updated, "errors": errors}
