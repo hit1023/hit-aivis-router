@@ -63,6 +63,14 @@ AIVIS_BACKEND_URLS=http://192.168.123.103:10101,http://192.168.123.104:10101
 docker compose up -d
 ```
 
+または `run.sh` の対話メニューを使うと、起動・更新・ログ確認などをまとめて操作できます。
+
+```bash
+./run.sh
+```
+
+詳細は [運用ガイド](docs/operations.md) を参照してください。
+
 ---
 
 ## API エンドポイント
