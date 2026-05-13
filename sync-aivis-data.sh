@@ -29,7 +29,17 @@ echo "Copying data: $SRC_DIR -> $DST_DIR"
 cp -f "$SRC_DIR/compound_splits.json"   "$DST_DIR/compound_splits.json"
 cp -f "$SRC_DIR/speaker_presets.json"   "$DST_DIR/speaker_presets.json"
 cp -f "$SRC_DIR/text_replacements.json" "$DST_DIR/text_replacements.json"
-cp -f "$SRC_DIR/speech_history.db"      "$DST_DIR/speech_history.db"
+
+echo ""
+echo "WARNING: speech_history.db をコピーすると $DST_PROJECT の履歴が上書きされます。"
+printf "本当にコピーしますか？ (y/N): "
+read -r answer
+if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+    cp -f "$SRC_DIR/speech_history.db" "$DST_DIR/speech_history.db"
+    echo "speech_history.db をコピーしました。"
+else
+    echo "speech_history.db のコピーをスキップしました。"
+fi
 
 echo "Starting $DST_PROJECT..."
 docker compose -p "$DST_PROJECT" -f "/home/hit/docker/$DST_PROJECT/docker-compose.yml" start
