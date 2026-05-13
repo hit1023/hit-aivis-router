@@ -5,6 +5,7 @@
 __pycache__/
 *.pyc
 .claude/
+docker-compose.override.yml
 # data/ 以下はサーバ固有データのため管理不要
 data/text_replacements.json
 data/compound_splits.json
