@@ -197,14 +197,19 @@ function syncUserDictFromApi() {
   if (!API_URL) { SpreadsheetApp.getUi().alert('接続先が未設定です。「接続先 → 追加・編集」から登録してください。'); return; }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName('単語辞書');
+  let mergeMode = false;
   if (sheet && sheet.getLastRow() > 1) {
     const ui = SpreadsheetApp.getUi();
     const res = ui.alert(
-      '単語辞書を上書きします',
-      `シートに既存のデータ（${sheet.getLastRow() - 1} 件）があります。\nAPIから取得した内容で上書きしてよいですか？`,
-      ui.ButtonSet.OK_CANCEL
+      '単語辞書を更新します',
+      `シートに既存のデータ（${sheet.getLastRow() - 1} 件）があります。\n\n` +
+      '「はい」: APIの内容で全件上書き\n' +
+      '「いいえ」: 既存データを保持しながら差分更新（新規追加・変更のみ反映）\n' +
+      '「キャンセル」: 中止',
+      ui.ButtonSet.YES_NO_CANCEL
     );
-    if (res !== ui.Button.OK) return;
+    if (res === ui.Button.CANCEL) return;
+    mergeMode = (res === ui.Button.NO);
   }
   if (!sheet) sheet = ss.insertSheet('単語辞書');
 
@@ -240,10 +245,31 @@ function syncUserDictFromApi() {
     rows.push([surfaceDisplay, pronArr.join('|'), atArr.join('|'), wordType, entry.priority ?? 5]);
   }
 
-  sheet.clearContents();
-  sheet.getRange(1, 1, rows.length, 5).setValues(rows);
-  setWordTypeValidation(sheet);
-  SpreadsheetApp.getUi().alert(`取得完了: ${rows.length - 1} 件\n接続先: ${getCurrentName()}`);
+  if (mergeMode) {
+    const existingData = sheet.getDataRange().getValues();
+    const existingMap = {};
+    for (let i = 1; i < existingData.length; i++) {
+      if (existingData[i][0]) existingMap[String(existingData[i][0])] = i + 1;
+    }
+    let updated = 0, added = 0;
+    for (const row of rows.slice(1)) {
+      const surface = String(row[0]);
+      if (existingMap[surface] !== undefined) {
+        sheet.getRange(existingMap[surface], 1, 1, 5).setValues([row]);
+        updated++;
+      } else {
+        sheet.appendRow(row);
+        added++;
+      }
+    }
+    setWordTypeValidation(sheet);
+    SpreadsheetApp.getUi().alert(`差分更新完了: 更新 ${updated} 件 / 追加 ${added} 件\n接続先: ${getCurrentName()}`);
+  } else {
+    sheet.clearContents();
+    sheet.getRange(1, 1, rows.length, 5).setValues(rows);
+    setWordTypeValidation(sheet);
+    SpreadsheetApp.getUi().alert(`取得完了（全件上書き）: ${rows.length - 1} 件\n接続先: ${getCurrentName()}`);
+  }
 }
 
 function importUserDict() {
@@ -289,14 +315,19 @@ function syncReplacementsFromApi() {
   if (!API_URL) { SpreadsheetApp.getUi().alert('接続先が未設定です。'); return; }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName('置換ルール');
+  let mergeMode = false;
   if (sheet && sheet.getLastRow() > 1) {
     const ui = SpreadsheetApp.getUi();
     const res = ui.alert(
-      '置換ルールを上書きします',
-      `シートに既存のデータ（${sheet.getLastRow() - 1} 件）があります。\nAPIから取得した内容で上書きしてよいですか？`,
-      ui.ButtonSet.OK_CANCEL
+      '置換ルールを更新します',
+      `シートに既存のデータ（${sheet.getLastRow() - 1} 件）があります。\n\n` +
+      '「はい」: APIの内容で全件上書き\n' +
+      '「いいえ」: 既存データを保持しながら差分更新（新規追加・変更のみ反映）\n' +
+      '「キャンセル」: 中止',
+      ui.ButtonSet.YES_NO_CANCEL
     );
-    if (res !== ui.Button.OK) return;
+    if (res === ui.Button.CANCEL) return;
+    mergeMode = (res === ui.Button.NO);
   }
   if (!sheet) sheet = ss.insertSheet('置換ルール');
 
@@ -306,9 +337,29 @@ function syncReplacementsFromApi() {
   const rules = JSON.parse(res.getContentText());
   const rows  = [['置換前', '置換後'], ...Object.entries(rules)];
 
-  sheet.clearContents();
-  sheet.getRange(1, 1, rows.length, 2).setValues(rows);
-  SpreadsheetApp.getUi().alert(`取得完了: ${rows.length - 1} 件\n接続先: ${getCurrentName()}`);
+  if (mergeMode) {
+    const existingData = sheet.getDataRange().getValues();
+    const existingMap = {};
+    for (let i = 1; i < existingData.length; i++) {
+      if (existingData[i][0]) existingMap[String(existingData[i][0])] = i + 1;
+    }
+    let updated = 0, added = 0;
+    for (const row of rows.slice(1)) {
+      const src = String(row[0]);
+      if (existingMap[src] !== undefined) {
+        sheet.getRange(existingMap[src], 1, 1, 2).setValues([row]);
+        updated++;
+      } else {
+        sheet.appendRow(row);
+        added++;
+      }
+    }
+    SpreadsheetApp.getUi().alert(`差分更新完了: 更新 ${updated} 件 / 追加 ${added} 件\n接続先: ${getCurrentName()}`);
+  } else {
+    sheet.clearContents();
+    sheet.getRange(1, 1, rows.length, 2).setValues(rows);
+    SpreadsheetApp.getUi().alert(`取得完了（全件上書き）: ${rows.length - 1} 件\n接続先: ${getCurrentName()}`);
+  }
 }
 
 function importTextReplacements() {
