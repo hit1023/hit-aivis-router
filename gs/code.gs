@@ -215,51 +215,23 @@ function syncUserDictFromApi() {
   }
   if (!sheet) sheet = ss.insertSheet('単語辞書');
 
-  const dictRes   = UrlFetchApp.fetch(`${API_URL}/user_dict?enable_compound_accent=true`, FETCH_OPT);
-  const splitsRes = UrlFetchApp.fetch(`${API_URL}/user_dict/compound_splits`, FETCH_OPT);
+  const dictRes = UrlFetchApp.fetch(`${API_URL}/user_dict?enable_compound_accent=true`, FETCH_OPT);
   if (dictRes.getResponseCode() !== 200) { SpreadsheetApp.getUi().alert('取得失敗: ' + dictRes.getContentText()); return; }
 
-  const dict      = JSON.parse(dictRes.getContentText());
-  const splitsRaw = splitsRes.getResponseCode() === 200 ? JSON.parse(splitsRes.getContentText()) : {};
+  const dict = JSON.parse(dictRes.getContentText());
 
-  function getSplitInfo(raw) {
-    if (!raw) return null;
-    return Array.isArray(raw) ? { surface: raw } : raw;
-  }
-
-  // compound_splits に登録されている複合語のパーツ（個別表層形）をセット化
-  // 例: "堀田創" → ["堀田","創"] なら {"堀田","創"} をセットに追加
-  // → APIが個別パーツとしても返してくる重複行をスキップするために使用
-  const componentSet = new Set();
-  for (const [, splitInfoRaw] of Object.entries(splitsRaw)) {
-    const info = getSplitInfo(splitInfoRaw);
-    if (info && Array.isArray(info.surface)) {
-      for (const s of info.surface) componentSet.add(s);
-    }
-  }
-
+  // 複合語（読みが複数要素の配列）はスキップ — スプレッドシートでは管理しない
   const rows = [['表層形', '読み', 'アクセント', '品詞', '優先度']];
   for (const [uuid, entry] of Object.entries(dict)) {
     if (typeof entry !== 'object') continue;
-    const surfaceKey = typeof entry.surface === 'string' ? entry.surface : (entry.surface || []).join('');
 
-    // 複合語のパーツ単体エントリはスキップ（複合語行として表示されるため）
-    if (typeof entry.surface === 'string' && componentSet.has(entry.surface)) continue;
+    const pronArr = Array.isArray(entry.pronunciation) ? entry.pronunciation : [entry.pronunciation || ''];
+    if (pronArr.length > 1) continue; // 複合語はスキップ
 
-    const splitInfo  = getSplitInfo(splitsRaw[surfaceKey]);
-    const splitList  = splitInfo ? splitInfo.surface : null;
-
-    let pronArr = Array.isArray(entry.pronunciation) ? entry.pronunciation : [entry.pronunciation || ''];
-    let atArr   = Array.isArray(entry.accent_type)   ? entry.accent_type   : [entry.accent_type ?? 0];
-
-    if (splitInfo && splitInfo.pronunciation && pronArr.length === 1 && splitInfo.pronunciation.length > 1) {
-      pronArr = splitInfo.pronunciation;
-      atArr   = splitInfo.accent_type || atArr;
-    }
-
-    const surfaceDisplay = splitList ? splitList.join('|') : surfaceKey;
-    const wordType       = resolveWordTypeLabel(entry.word_type);
-    rows.push([surfaceDisplay, pronArr.join('|'), atArr.join('|'), wordType, entry.priority ?? 5]);
+    const surface  = typeof entry.surface === 'string' ? entry.surface : (entry.surface || []).join('');
+    const atArr    = Array.isArray(entry.accent_type) ? entry.accent_type : [entry.accent_type ?? 0];
+    const wordType = resolveWordTypeLabel(entry.word_type);
+    rows.push([surface, pronArr[0], atArr[0], wordType, entry.priority ?? 5]);
   }
 
   if (mergeMode) {
@@ -314,14 +286,13 @@ function importUserDict() {
     const [surfaceRaw, pronRaw, accentRaw, wordType, priority] = data[i];
     if (!surfaceRaw) continue;
 
-    const surfaceList = String(surfaceRaw).split('|').map(s => s.trim()).filter(Boolean);
-    const pronList    = String(pronRaw).split('|').map(p => p.trim()).filter(Boolean);
-    const accentList  = String(accentRaw).split('|').map(a => parseInt(a) || 0);
+    // 複合語（| 区切り）はスキップ — スプレッドシートでは管理しない
+    if (String(surfaceRaw).includes('|') || String(pronRaw).includes('|')) continue;
 
     const payload = {
-      surface:       surfaceList,
-      pronunciation: pronList.length ? pronList : surfaceList,
-      accent_type:   accentList.length === surfaceList.length ? accentList : surfaceList.map(() => 0),
+      surface:       [String(surfaceRaw).trim()],
+      pronunciation: [String(pronRaw).trim()],
+      accent_type:   [parseInt(accentRaw) || 0],
       word_type:     resolveWordType(String(wordType)),
       priority:      parseInt(priority) || 5,
     };
