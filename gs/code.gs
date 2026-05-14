@@ -197,6 +197,15 @@ function syncUserDictFromApi() {
   if (!API_URL) { SpreadsheetApp.getUi().alert('接続先が未設定です。「接続先 → 追加・編集」から登録してください。'); return; }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName('単語辞書');
+  if (sheet && sheet.getLastRow() > 1) {
+    const ui = SpreadsheetApp.getUi();
+    const res = ui.alert(
+      '単語辞書を上書きします',
+      `シートに既存のデータ（${sheet.getLastRow() - 1} 件）があります。\nAPIから取得した内容で上書きしてよいですか？`,
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (res !== ui.Button.OK) return;
+  }
   if (!sheet) sheet = ss.insertSheet('単語辞書');
 
   const dictRes   = UrlFetchApp.fetch(`${API_URL}/user_dict?enable_compound_accent=true`, FETCH_OPT);
@@ -280,6 +289,15 @@ function syncReplacementsFromApi() {
   if (!API_URL) { SpreadsheetApp.getUi().alert('接続先が未設定です。'); return; }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName('置換ルール');
+  if (sheet && sheet.getLastRow() > 1) {
+    const ui = SpreadsheetApp.getUi();
+    const res = ui.alert(
+      '置換ルールを上書きします',
+      `シートに既存のデータ（${sheet.getLastRow() - 1} 件）があります。\nAPIから取得した内容で上書きしてよいですか？`,
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (res !== ui.Button.OK) return;
+  }
   if (!sheet) sheet = ss.insertSheet('置換ルール');
 
   const res = UrlFetchApp.fetch(`${API_URL}/text_replacements`, FETCH_OPT);
