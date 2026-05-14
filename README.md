@@ -71,6 +71,8 @@ docker compose up -d
 
 詳細は [運用ガイド](docs/operations.md) を参照してください。
 
+ユーザー辞書・置き換えルールの登録方法は [読み登録ガイド](docs/dict-guide.md) を参照してください。
+
 ---
 
 ## API エンドポイント
