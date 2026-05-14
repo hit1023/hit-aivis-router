@@ -718,14 +718,39 @@ async def add_user_dict_word(req: UserDictWordRequest) -> UserDictWordAdded:
             status_code=422,
             detail="surface / pronunciation / accent_type のリスト長が一致していません",
         )
+    # 同じ表層形がすでに登録されている場合は上書き更新（upsert）
+    joined_surface = "".join(req.surface)
     try:
-        word_uuid = await pool.add_user_dict_word(
-            surface=req.surface,
-            pronunciation=req.pronunciation,
-            accent_type=req.accent_type,
-            word_type=req.word_type.value,
-            priority=req.priority,
-        )
+        existing = await pool.get_user_dict(enable_compound_accent=True)
+    except Exception as exc:
+        logger.error("get_user_dict failed in upsert check: %s", exc)
+        existing = {}
+    existing_uuid = next(
+        (uid for uid, e in existing.items()
+         if (e.get("surface") == joined_surface
+             or (isinstance(e.get("surface"), list) and "".join(e["surface"]) == joined_surface))),
+        None,
+    )
+    try:
+        if existing_uuid:
+            await pool.update_user_dict_word(
+                word_uuid=existing_uuid,
+                surface=req.surface,
+                pronunciation=req.pronunciation,
+                accent_type=req.accent_type,
+                word_type=req.word_type.value,
+                priority=req.priority,
+            )
+            word_uuid = existing_uuid
+            logger.info("upsert: updated existing entry %s (surface=%r)", existing_uuid, joined_surface)
+        else:
+            word_uuid = await pool.add_user_dict_word(
+                surface=req.surface,
+                pronunciation=req.pronunciation,
+                accent_type=req.accent_type,
+                word_type=req.word_type.value,
+                priority=req.priority,
+            )
     except Exception as exc:
         logger.error("add_user_dict_word failed: %s", exc)
         raise HTTPException(status_code=502, detail="単語の追加に失敗しました")
