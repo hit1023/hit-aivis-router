@@ -67,6 +67,8 @@ function onOpen() {
     .addItem('置換ルールをAPIから取得', 'syncReplacementsFromApi')
     .addItem('置換ルールをAPIへ送る', 'importTextReplacements')
     .addSeparator()
+    .addItem('🧹 単語辞書の重複を削除', 'dedupDictSheet')
+    .addSeparator()
     .addSubMenu(ui.createMenu('🔗 接続先')
       .addItem('切り替え', 'showSwitchDialog')
       .addItem('追加・編集', 'showAddDialog')
@@ -246,22 +248,34 @@ function syncUserDictFromApi() {
   }
 
   if (mergeMode) {
-    const existingData = sheet.getDataRange().getValues();
-    const existingMap = {};
-    for (let i = 1; i < existingData.length; i++) {
-      if (existingData[i][0]) existingMap[String(existingData[i][0])] = i + 1;
-    }
-    let updated = 0, added = 0;
+    // APIデータをMapに変換
+    const apiMap = new Map();
     for (const row of rows.slice(1)) {
-      const surface = String(row[0]);
-      if (existingMap[surface] !== undefined) {
-        sheet.getRange(existingMap[surface], 1, 1, 5).setValues([row]);
+      apiMap.set(String(row[0]).trim(), row);
+    }
+    // 既存シートを走査: APIデータで更新しつつ重複・空行を除去
+    const existingData = sheet.getDataRange().getValues();
+    const merged = [existingData[0]]; // ヘッダー
+    const seen = new Set();
+    let updated = 0;
+    for (let i = 1; i < existingData.length; i++) {
+      const surface = String(existingData[i][0]).trim();
+      if (!surface || seen.has(surface)) continue; // 空行・重複をスキップ
+      seen.add(surface);
+      if (apiMap.has(surface)) {
+        merged.push(apiMap.get(surface)); // API版で上書き
         updated++;
       } else {
-        sheet.appendRow(row);
-        added++;
+        merged.push(existingData[i]); // シート独自行を保持
       }
     }
+    // APIにあってシートにない新規行を末尾に追加
+    let added = 0;
+    for (const [surface, row] of apiMap) {
+      if (!seen.has(surface)) { merged.push(row); added++; }
+    }
+    sheet.clearContents();
+    sheet.getRange(1, 1, merged.length, 5).setValues(merged);
     setWordTypeValidation(sheet);
     SpreadsheetApp.getUi().alert(`差分更新完了: 更新 ${updated} 件 / 追加 ${added} 件\n接続先: ${getCurrentName()}`);
   } else {
@@ -338,22 +352,31 @@ function syncReplacementsFromApi() {
   const rows  = [['置換前', '置換後'], ...Object.entries(rules)];
 
   if (mergeMode) {
-    const existingData = sheet.getDataRange().getValues();
-    const existingMap = {};
-    for (let i = 1; i < existingData.length; i++) {
-      if (existingData[i][0]) existingMap[String(existingData[i][0])] = i + 1;
-    }
-    let updated = 0, added = 0;
+    const apiMap = new Map();
     for (const row of rows.slice(1)) {
-      const src = String(row[0]);
-      if (existingMap[src] !== undefined) {
-        sheet.getRange(existingMap[src], 1, 1, 2).setValues([row]);
+      apiMap.set(String(row[0]).trim(), row);
+    }
+    const existingData = sheet.getDataRange().getValues();
+    const merged = [existingData[0]];
+    const seen = new Set();
+    let updated = 0;
+    for (let i = 1; i < existingData.length; i++) {
+      const src = String(existingData[i][0]).trim();
+      if (!src || seen.has(src)) continue;
+      seen.add(src);
+      if (apiMap.has(src)) {
+        merged.push(apiMap.get(src));
         updated++;
       } else {
-        sheet.appendRow(row);
-        added++;
+        merged.push(existingData[i]);
       }
     }
+    let added = 0;
+    for (const [src, row] of apiMap) {
+      if (!seen.has(src)) { merged.push(row); added++; }
+    }
+    sheet.clearContents();
+    sheet.getRange(1, 1, merged.length, 2).setValues(merged);
     SpreadsheetApp.getUi().alert(`差分更新完了: 更新 ${updated} 件 / 追加 ${added} 件\n接続先: ${getCurrentName()}`);
   } else {
     sheet.clearContents();
@@ -404,6 +427,26 @@ function resolveWordType(label) {
     '語尾':          'SUFFIX',
   };
   return map[label] || 'PROPER_NOUN';
+}
+
+function dedupDictSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('単語辞書');
+  if (!sheet) { SpreadsheetApp.getUi().alert('「単語辞書」シートが見つかりません'); return; }
+  const data = sheet.getDataRange().getValues();
+  const deduped = [data[0]];
+  const seen = new Set();
+  for (let i = 1; i < data.length; i++) {
+    const surface = String(data[i][0]).trim();
+    if (!surface || seen.has(surface)) continue;
+    seen.add(surface);
+    deduped.push(data[i]);
+  }
+  const removed = data.length - deduped.length;
+  sheet.clearContents();
+  sheet.getRange(1, 1, deduped.length, 5).setValues(deduped);
+  setWordTypeValidation(sheet);
+  SpreadsheetApp.getUi().alert(`重複削除完了: ${removed} 件削除 / ${deduped.length - 1} 件残存`);
 }
 
 function setWordTypeValidation(sheet) {
