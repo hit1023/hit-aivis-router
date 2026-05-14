@@ -227,10 +227,25 @@ function syncUserDictFromApi() {
     return Array.isArray(raw) ? { surface: raw } : raw;
   }
 
+  // compound_splits に登録されている複合語のパーツ（個別表層形）をセット化
+  // 例: "堀田創" → ["堀田","創"] なら {"堀田","創"} をセットに追加
+  // → APIが個別パーツとしても返してくる重複行をスキップするために使用
+  const componentSet = new Set();
+  for (const [, splitInfoRaw] of Object.entries(splitsRaw)) {
+    const info = getSplitInfo(splitInfoRaw);
+    if (info && Array.isArray(info.surface)) {
+      for (const s of info.surface) componentSet.add(s);
+    }
+  }
+
   const rows = [['表層形', '読み', 'アクセント', '品詞', '優先度']];
   for (const [uuid, entry] of Object.entries(dict)) {
     if (typeof entry !== 'object') continue;
     const surfaceKey = typeof entry.surface === 'string' ? entry.surface : (entry.surface || []).join('');
+
+    // 複合語のパーツ単体エントリはスキップ（複合語行として表示されるため）
+    if (typeof entry.surface === 'string' && componentSet.has(entry.surface)) continue;
+
     const splitInfo  = getSplitInfo(splitsRaw[surfaceKey]);
     const splitList  = splitInfo ? splitInfo.surface : null;
 
