@@ -233,6 +233,7 @@ function syncUserDictFromApi() {
 
   sheet.clearContents();
   sheet.getRange(1, 1, rows.length, 5).setValues(rows);
+  setWordTypeValidation(sheet);
   SpreadsheetApp.getUi().alert(`取得完了: ${rows.length - 1} 件\n接続先: ${getCurrentName()}`);
 }
 
@@ -334,6 +335,19 @@ function resolveWordType(label) {
     '語尾':          'SUFFIX',
   };
   return map[label] || 'PROPER_NOUN';
+}
+
+function setWordTypeValidation(sheet) {
+  const wordTypes = [
+    '固有名詞', '地名', '組織・施設名', '人名', '人名（姓）', '人名（名）',
+    '普通名詞', '動詞', '形容詞', '語尾',
+  ];
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(wordTypes, true)
+    .setAllowInvalid(true)
+    .build();
+  const lastRow = Math.max(sheet.getLastRow(), 2);
+  sheet.getRange(2, 4, lastRow - 1, 1).setDataValidation(rule);
 }
 
 function resolveWordTypeLabel(wordType) {
