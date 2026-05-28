@@ -29,8 +29,8 @@ AivisSpeech Engine のシンプルなラッパー API です。
 ### 1. リポジトリをクローン
 
 ```bash
-git clone git@github.com:hit1023/mm-aivis-router.git
-cd mm-aivis-router
+git clone git@github.com:hit1023/hit-aivis-router.git
+cd hit-aivis-router
 ```
 
 ### 2. 環境変数を設定
@@ -207,20 +207,6 @@ GET    /user_dict/compound_splits  # 複合語の表層形分割情報を取得
 - `品詞` / `優先度` は省略可（デフォルト: 固有名詞 / 5）
 - 複合語は `|` で各形態素を区切る（表層形・読み・アクセントの要素数を一致させること）
 - 既存の同じ表層形の単語は上書き（UPSERT）
-
-#### Google スプレッドシートによる管理
-
-単語辞書・置換ルールは Google スプレッドシートで一元管理できます。  
-Apps Script 経由で API と双方向同期が可能です。
-
-📄 **管理スプレッドシート：** https://docs.google.com/spreadsheets/d/1eqyFFZGPusNO9Qx_dAVaLAkzUTvsb3vQNLV8altXxGU/edit?usp=sharing
-
-| メニュー | 説明 |
-|---------|------|
-| 単語辞書をAPIへ送る | シートの内容を API に UPSERT |
-| 単語辞書をAPIから取得 | API の現在の辞書をシートに反映 |
-| 置換ルールをAPIへ送る | シートの内容を API に送信（UPSERT or フルリプレース） |
-| 置換ルールをAPIから取得 | API の現在のルールをシートに反映 |
 
 ---
 
