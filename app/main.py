@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
@@ -15,7 +16,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 from .audio import wav_to_mp3
-from .backend_pool import BackendPool
+from .backend_pool import (
+    BackendPool,
+    ModelLoadFailed,
+    SpeakerNotFound,
+    SynthesisFailed,
+)
 from .config import settings
 from .speaker_preset import SpeakerPresetManager
 from .text_replacer import TextReplacer
@@ -50,6 +56,49 @@ AivisSpeech Engine のシンプルなラッパー API です。
 """
 
 
+def _reject_if_cloud(action: str) -> None:
+    """Aivis Cloud では意味を持たない操作（VRAM やモデルファイルの管理）を明確に断る。
+
+    Cloud はモデルがサービス側に常設されているため、インストール / アンインストールの
+    概念自体が無い。曖昧な 502 ではなく 501 で理由を返す。
+    """
+    if settings.is_cloud:
+        raise HTTPException(
+            status_code=501,
+            detail=f"{action}は Aivis Cloud バックエンドでは利用できません（TTS_PROVIDER=local のときのみ）",
+        )
+
+
+def _resolve_cloud_user_dict_uuid() -> str:
+    """Aivis Cloud のユーザー辞書 UUID を決める（.env → 保存ファイル → 新規生成の順）。
+
+    Cloud 側の辞書はサーバーが UUID を払い出すのではなく、クライアントが指定した UUID で
+    upsert される仕様。毎回違う UUID を使うと辞書が増え続けて登録済みの単語を見失うため、
+    一度決めた値を /data に残して使い回す。
+    """
+    if settings.aivis_cloud_user_dict_uuid:
+        return settings.aivis_cloud_user_dict_uuid
+
+    path = Path(settings.aivis_cloud_user_dict_uuid_file)
+    try:
+        if path.exists():
+            saved = path.read_text(encoding="utf-8").strip()
+            if saved:
+                return saved
+    except OSError as exc:
+        logger.warning("ユーザー辞書 UUID の読み込みに失敗: %s", exc)
+
+    new_uuid = str(uuid.uuid4())
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_uuid, encoding="utf-8")
+        logger.info("Aivis Cloud のユーザー辞書 UUID を新規発行しました: %s", new_uuid)
+    except OSError as exc:
+        # 保存できなくても動作はする（次回起動時にまた別の辞書になるだけ）
+        logger.warning("ユーザー辞書 UUID の保存に失敗（次回起動時に再発行されます）: %s", exc)
+    return new_uuid
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pool, replacer, presets
@@ -57,12 +106,21 @@ async def lifespan(app: FastAPI):
     replacer = TextReplacer(Path(settings.text_replacements_file), seed_file=Path("/srv/name.txt"))
     presets = SpeakerPresetManager(Path(settings.speaker_presets_file))
     pool = BackendPool(settings.backend_urls, idle_timeout=settings.model_idle_timeout)
+    if pool.is_cloud:
+        # Cloud のユーザー辞書は「クライアントが UUID を決める」仕様なので、
+        # 一度決めた UUID をファイルに残して以後ずっと同じ辞書を使う。
+        cloud = pool.cloud_backend()
+        if cloud is not None:
+            cloud.set_user_dict_uuid(_resolve_cloud_user_dict_uuid())
     try:
         await pool.initialize()
     except Exception as exc:
         logger.warning("Backend initialization failed (will retry on first request): %s", exc)
     cleanup_task = asyncio.create_task(pool.start_cleanup_loop())
-    logger.info("Backends: %s", settings.backend_urls)
+    if pool.is_cloud:
+        logger.info("TTS backend: Aivis Cloud API (%s)", settings.aivis_cloud_api_url)
+    else:
+        logger.info("TTS backend: AivisSpeech Engine %s", settings.backend_urls)
     yield
     cleanup_task.cancel()
     await pool.close()
@@ -202,14 +260,6 @@ class ModelStatus(BaseModel):
 async def speak(req: SpeakRequest):
     backend = pool.next()
 
-    try:
-        await backend.manager.ensure_loaded(req.speaker_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        logger.error("Model load failed: %s", exc)
-        raise HTTPException(status_code=503, detail="音声モデルの読み込みに失敗しました")
-
     processed_text = replacer.apply(req.text)
     if processed_text != req.text:
         logger.info("テキスト置換: %r → %r", req.text, processed_text)
@@ -239,28 +289,31 @@ async def speak(req: SpeakRequest):
             req.speaker_id, speed, pitch, intonation, volume, tempo_dynamics, pause_length_scale,
         )
 
+    # 実際の合成はバックエンド（ローカルの AivisSpeech Engine / Aivis Cloud API）に委ねる。
+    # ここから下はどちらのバックエンドでも共通の処理なので、テキスト置換・プリセット・
+    # 発話履歴は TTS_PROVIDER を切り替えても同じように効く。
     try:
-        query = await backend.client.audio_query(processed_text, req.speaker_id)
-    except Exception as exc:
-        logger.error("audio_query failed: %s", exc)
-        raise HTTPException(status_code=502, detail="音声クエリの生成に失敗しました")
-
-    query["speedScale"] = speed
-    query["pitchScale"] = pitch
-    query["intonationScale"] = intonation
-    query["volumeScale"] = volume
-    query["tempoDynamicsScale"] = tempo_dynamics
-    query["pauseLengthScale"] = pause_length_scale
-    if pause_length is not None:
-        query["pauseLength"] = pause_length
-
-    try:
-        wav_bytes = await backend.client.synthesis(req.speaker_id, query)
-    except Exception as exc:
+        mp3_bytes = await backend.synthesize_mp3(
+            processed_text,
+            req.speaker_id,
+            {
+                "speed": speed,
+                "pitch": pitch,
+                "intonation": intonation,
+                "volume": volume,
+                "tempo_dynamics": tempo_dynamics,
+                "pause_length": pause_length,
+                "pause_length_scale": pause_length_scale,
+            },
+        )
+    except SpeakerNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ModelLoadFailed as exc:
+        logger.error("Model load failed: %s", exc)
+        raise HTTPException(status_code=503, detail="音声モデルの読み込みに失敗しました")
+    except SynthesisFailed as exc:
         logger.error("synthesis failed: %s", exc)
         raise HTTPException(status_code=502, detail="音声合成に失敗しました")
-
-    mp3_bytes = wav_to_mp3(wav_bytes, bitrate=settings.mp3_bitrate)
 
     asyncio.create_task(speech_history.record(
         speaker_id=req.speaker_id,
@@ -345,6 +398,7 @@ async def list_models():
     tags=["モデル管理"],
 )
 async def install_model(file: UploadFile = File(...)):
+    _reject_if_cloud("モデルのインストール")
     filename = file.filename or "model.aivmx"
     if not filename.split("?")[0].endswith(".aivmx"):
         raise HTTPException(status_code=400, detail="ファイルは .aivmx 形式を指定してください")
@@ -398,6 +452,7 @@ async def force_unload_model(aivm_uuid: str):
     tags=["モデル管理"],
 )
 async def uninstall_model(aivm_uuid: str):
+    _reject_if_cloud("モデルのアンインストール")
     try:
         results = await pool.uninstall_model(aivm_uuid)
     except Exception as exc:
@@ -426,10 +481,17 @@ async def health():
 @app.post(
     "/audio_query",
     summary="アクセント句の取得",
-    description="テキストの音声クエリ（アクセント句・ピッチ情報）を返します。アクセント可視化に使用できます。",
+    description="""
+テキストの音声クエリ（アクセント句・ピッチ情報）を返します。アクセント可視化に使用できます。
+
+**このエンドポイントは `TTS_PROVIDER=local`（AivisSpeech Engine）専用です。**
+Aivis Cloud API には合成前のアクセント句を取得する経路が無いため、
+`TTS_PROVIDER=aivis_cloud` では 501 を返します（WebUI のピッチ曲線表示のみ使えなくなります）。
+""",
     tags=["情報取得"],
 )
 async def audio_query_endpoint(text: str, speaker_id: int):
+    _reject_if_cloud("アクセント句の取得")
     backend = pool.next()
     try:
         await backend.manager.ensure_loaded(speaker_id)

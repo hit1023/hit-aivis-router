@@ -45,17 +45,65 @@ cp .env.example .env
 
 | 変数名 | デフォルト値 | 説明 |
 |--------|-------------|------|
-| `AIVIS_BACKEND_URLS` | `http://localhost:10101` | AivisSpeech Engine のURL（複数の場合はカンマ区切り） |
-| `MODEL_IDLE_TIMEOUT` | `600` | モデルの自動アンロードまでの秒数 |
+| `TTS_PROVIDER` | `local` | 合成バックエンドの種別。`local` / `aivis_cloud` |
 | `MP3_BITRATE` | `192k` | MP3の出力ビットレート |
 | `HOST` | `0.0.0.0` | リッスンするホストアドレス |
 | `PORT` | `8000` | リッスンするポート番号 |
 | `SPEECH_HISTORY_DB` | `/data/speech_history.db` | 発話履歴SQLiteファイルのパス |
 
+`TTS_PROVIDER=local`（AivisSpeech Engine）のとき：
+
+| 変数名 | デフォルト値 | 説明 |
+|--------|-------------|------|
+| `AIVIS_BACKEND_URLS` | `http://localhost:10101` | AivisSpeech Engine のURL（複数の場合はカンマ区切り） |
+| `MODEL_IDLE_TIMEOUT` | `600` | モデルの自動アンロードまでの秒数 |
+
 複数バックエンドの例：
 ```env
 AIVIS_BACKEND_URLS=http://192.168.123.103:10101,http://192.168.123.104:10101
 ```
+
+`TTS_PROVIDER=aivis_cloud`（Aivis Cloud API）のとき：
+
+| 変数名 | デフォルト値 | 説明 |
+|--------|-------------|------|
+| `AIVIS_CLOUD_API_KEY` | （必須） | [Aivis Hub](https://hub.aivis-project.com/) で発行するAPIキー |
+| `AIVIS_CLOUD_API_URL` | `https://api.aivis-project.com` | 通常は変更不要 |
+| `AIVIS_CLOUD_MODEL_UUIDS` | （空） | `/speakers` に載せるモデルUUID（カンマ区切り）。空なら人気順で自動取得 |
+| `AIVIS_CLOUD_CATALOG_LIMIT` | `30` | 自動取得するモデル件数 |
+| `AIVIS_CLOUD_USER_DICT_UUID` | （空） | ユーザー辞書UUID。空なら初回起動時に自動生成して `/data` に保存 |
+
+---
+
+## バックエンドの切り替えについて
+
+`TTS_PROVIDER` を変えるだけで、AivisSpeech Engine（GPUが必要）と
+Aivis Cloud API（従量課金・GPU不要）を行き来できます。
+**`/speak` の入出力は変わらないため、このルーターを叩いている側のアプリは無変更で動きます。**
+
+テキスト置換・話者プリセット・発話履歴・ユーザー辞書は、
+どちらのバックエンドでも共通に効きます。
+
+`aivis_cloud` を選んだ場合の制約：
+
+| 機能 | 挙動 |
+|------|------|
+| モデルのインストール / アンインストール | 501（Cloud はモデルがサービス側に常設のため概念が無い） |
+| モデルの強制アンロード / 自動アンロード | 何もしない（VRAM の概念が無いため） |
+| `/audio_query`（アクセント句・ピッチ情報） | 501（Cloud に合成前のクエリ取得APIが無い。WebUIのピッチ曲線表示のみ使えなくなる） |
+| スタイルIDの数値 | **`local` とは一致しない**（下記） |
+
+### スタイルIDについての注意
+
+Aivis Cloud API は話者ごとの `local_id`（0〜31）しか返さず、AivisSpeech Engine が
+使っているグローバルなスタイルID（`855257952` のような値）を公開していません。
+そのため `aivis_cloud` では、ルーターが「話者UUID + ローカルスタイルID」から
+決定的にIDを導出しています。
+
+**結果として、同じ声でも `local` と `aivis_cloud` ではスタイルIDの数値が変わります。**
+切り替え後に古いIDで `/speak` を呼ばれた場合は、エラーにせずカタログ先頭の話者で
+合成して会話が止まらないようにしています（警告ログは出ます）。
+切り替えたら `/speakers` を見て、呼び出し側の話者設定を選び直してください。
 
 ### 3. 起動
 
