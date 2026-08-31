@@ -149,6 +149,10 @@ class CloudBackend:
         # 未知のスタイル ID を渡された時に使う既定（カタログの先頭）
         self._default_style_id: Optional[int] = None
         self._user_dict_uuid: Optional[str] = None
+        # Cloud 側に辞書の実体が「まだ無い」状態で user_dictionary_uuid を送ると
+        # 422 (User dictionary not found) で合成そのものが失敗する。実体を確認/作成
+        # できるまでは辞書を指定しない（辞書が無いだけで喋れなくなるのを防ぐ）。
+        self._user_dict_ready = False
 
     # -- カタログ ------------------------------------------------------
 
@@ -252,7 +256,7 @@ class CloudBackend:
                 pitch=params["pitch"],
                 volume=params["volume"],
                 line_break_silence_seconds=line_break_silence,
-                user_dictionary_uuid=self._user_dict_uuid,
+                user_dictionary_uuid=self._user_dict_uuid if self._user_dict_ready else None,
                 output_bitrate=settings.mp3_bitrate_kbps,
             )
         except Exception as exc:
@@ -267,6 +271,29 @@ class CloudBackend:
     def set_user_dict_uuid(self, dict_uuid: str) -> None:
         self._user_dict_uuid = dict_uuid
 
+    async def ensure_user_dictionary(self) -> None:
+        """辞書の実体が Cloud 側にあることを保証する（無ければ空で作る）。
+
+        Cloud の辞書はクライアントが決めた UUID で PUT した時に初めて実体ができる。
+        存在しない UUID を合成時に渡すと 422 になるため、起動時にここで作っておく。
+        失敗しても `_user_dict_ready` が False のままになるだけで、合成は
+        「辞書なし」で通常どおり動く。
+        """
+        if not self._user_dict_uuid:
+            return
+        try:
+            doc = await self.client.get_user_dictionary(self._user_dict_uuid)
+            if doc is None:
+                await self.client.put_user_dictionary(
+                    self._user_dict_uuid, settings.aivis_cloud_user_dict_name, []
+                )
+                logger.info("Aivis Cloud のユーザー辞書を新規作成しました: %s", self._user_dict_uuid)
+            self._user_dict_ready = True
+        except Exception as exc:
+            logger.warning(
+                "ユーザー辞書の準備に失敗しました（辞書なしで合成を続行します）: %s", exc
+            )
+
     async def _load_words(self) -> list[dict]:
         if not self._user_dict_uuid:
             return []
@@ -277,6 +304,8 @@ class CloudBackend:
         await self.client.put_user_dictionary(
             self._user_dict_uuid, settings.aivis_cloud_user_dict_name, words
         )
+        # 書き込めた時点で辞書の実体は確実に存在する
+        self._user_dict_ready = True
 
     async def get_user_dict(self, enable_compound_accent: bool = False) -> dict:
         """AivisSpeech の `/user_dict` と同じ「UUID をキーにした dict」の形で返す。"""
@@ -396,6 +425,8 @@ class BackendPool:
 
     async def initialize(self) -> None:
         await asyncio.gather(*(b.refresh() for b in self._backends))
+        if self.is_cloud:
+            await self._backends[0].ensure_user_dictionary()
 
     async def start_cleanup_loop(self) -> None:
         # Cloud には VRAM の概念が無いのでアンロードのループ自体が不要
