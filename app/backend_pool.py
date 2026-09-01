@@ -308,19 +308,33 @@ class CloudBackend:
         self._user_dict_ready = True
 
     async def get_user_dict(self, enable_compound_accent: bool = False) -> dict:
-        """AivisSpeech の `/user_dict` と同じ「UUID をキーにした dict」の形で返す。"""
+        """AivisSpeech の `/user_dict` と同じ「UUID をキーにした dict」の形で返す。
+
+        Cloud も surface / pronunciation / accent_type を**リスト**で持つ（複合語対応）ため、
+        `enable_compound_accent=True` 相当の形がそのまま得られる。False が渡された場合は
+        後方互換のため結合した文字列にして返す。
+        """
         words = await self._load_words()
-        return {
-            w.get("uuid", ""): {
-                "surface": w.get("surface", ""),
-                "pronunciation": w.get("pronunciation", ""),
-                "accent_type": w.get("accent_type", 0),
+        result: dict[str, dict] = {}
+        for w in words:
+            uid = w.get("uuid")
+            if not uid:
+                continue
+            surface = w.get("surface", [])
+            pronunciation = w.get("pronunciation", [])
+            accent_type = w.get("accent_type", [])
+            if not enable_compound_accent:
+                surface = "".join(surface)
+                pronunciation = "".join(pronunciation)
+                accent_type = accent_type[0] if accent_type else 0
+            result[uid] = {
+                "surface": surface,
+                "pronunciation": pronunciation,
+                "accent_type": accent_type,
                 "word_type": w.get("word_type", "PROPER_NOUN"),
                 "priority": w.get("priority", 5),
             }
-            for w in words
-            if w.get("uuid")
-        }
+        return result
 
     async def add_user_dict_word(
         self,
@@ -334,13 +348,14 @@ class CloudBackend:
 
         word_uuid = str(_uuid.uuid4())
         words = await self._load_words()
-        # Cloud の 1 語 = 1 表層形なので、複合語は結合して 1 語として登録する
+        # Cloud も surface / pronunciation / accent_type をリストで受け取る（複合語対応）ので、
+        # ローカル版と同じくそのまま渡す。
         words.append(
             {
                 "uuid": word_uuid,
-                "surface": "".join(surface),
-                "pronunciation": "".join(pronunciation),
-                "accent_type": accent_type[0] if accent_type else 0,
+                "surface": surface,
+                "pronunciation": pronunciation,
+                "accent_type": accent_type,
                 "word_type": word_type,
                 "priority": priority,
             }
@@ -362,9 +377,9 @@ class CloudBackend:
             if w.get("uuid") == word_uuid:
                 w.update(
                     {
-                        "surface": "".join(surface),
-                        "pronunciation": "".join(pronunciation),
-                        "accent_type": accent_type[0] if accent_type else 0,
+                        "surface": surface,
+                        "pronunciation": pronunciation,
+                        "accent_type": accent_type,
                         "word_type": word_type,
                         "priority": priority,
                     }
