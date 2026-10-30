@@ -505,6 +505,8 @@ class BackendPool:
                 b.manager.idle_timeout = idle_timeout
         self._cycle = itertools.cycle(self._backends)
         self._idle_timeout = idle_timeout
+        # モデル同期中（まだ振り分けに入れていない）の台。url -> 状態
+        self._pending: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # 台の管理（設定画面から）
@@ -546,17 +548,37 @@ class BackendPool:
         finally:
             await client.close()
 
+    def _pending_view(self, url_visible: bool, first_index: int) -> list[dict]:
+        out = []
+        for i, (url, p) in enumerate(self._pending.items(), start=first_index):
+            row = {
+                "index": i,
+                "ok": False,
+                "state": p["state"],
+                "sync_done": p["done"],
+                "sync_total": p["total"],
+                "sync_current": p["current"],
+                "words_state": p["words_state"],
+                "words_total": p["words_total"],
+                "error": p["error"],
+            }
+            if url_visible:
+                row["url"] = url
+            out.append(row)
+        return out
+
     async def backend_status(self) -> list[dict]:
-        """登録済みの台の状態（死活・応答時間・ロード済みモデル数）。"""
+        """登録済みの台の状態（死活・応答時間・ロード済みモデル数）。同期中の台も末尾に付く。"""
         if self.is_cloud:
             return [{"url": self._backends[0].url, "ok": True, "cloud": True}]
         probes = await asyncio.gather(*(self.probe(b.url) for b in self._backends))
         out = []
         for b, pr in zip(self._backends, probes):
             pr["loaded_models"] = sum(1 for v in b.manager._loaded.values() if v)
+            pr["state"] = "active"
             pr.update(self._usage(b))
             out.append(pr)
-        return out
+        return out + self._pending_view(True, len(out) + 1)
 
     @staticmethod
     def _usage(b: "Backend") -> dict:
@@ -572,30 +594,33 @@ class BackendPool:
     async def public_status(self) -> list[dict]:
         """認証不要の状態表示用。URL（社内IP）は含めず、台の番号だけで返す。"""
         if self.is_cloud:
-            return [{"index": 1, "ok": True, "cloud": True}]
+            return [{"index": 1, "ok": True, "cloud": True, "state": "active"}]
         probes = await asyncio.gather(*(self.probe(b.url) for b in self._backends))
         out = []
         for i, (b, pr) in enumerate(zip(self._backends, probes), start=1):
             out.append({
                 "index": i,
+                "state": "active",
                 "ok": pr["ok"],
                 "latency_ms": pr.get("latency_ms"),
                 "speakers": pr.get("speakers"),
                 "loaded_models": sum(1 for v in b.manager._loaded.values() if v),
                 **self._usage(b),
             })
-        return out
+        return out + self._pending_view(False, len(out) + 1)
 
     async def add_backend(self, url: str) -> dict:
-        """台を追加する。戻り値は `{"url": 正規化したURL, "synced_words": 辞書からコピーした単語数}`。
+        """台を追加する。
 
-        ルーターは台ごとのモデルを複製できないので、既存の台にある話者が新しい台に
-        すべてあることを確認する。辞書は最初の台から新しい台へコピーする（UUID は保つ）。
+        - 話者が揃っている台は、辞書をコピーしてすぐ振り分けに加える（state=active）。
+        - モデルが足りない台は、`models_source_dir` があれば裏でモデルを送り込み、
+          完了してから振り分けに加える（state=syncing、遅延同期）。無ければ拒否する。
         """
         if self.is_cloud:
             raise NotImplementedError("Aivis Cloud では台の追加はできません")
         url = await validate_backend_url(url)
-        if any(b.url.rstrip("/") == url for b in self._backends):
+        norm = url.rstrip("/")
+        if any(b.url.rstrip("/") == norm for b in self._backends) or norm in self._pending:
             raise InvalidBackendURL("すでに登録されています")
         result = await self.probe(url)
         if not result["ok"]:
@@ -604,19 +629,83 @@ class BackendPool:
         backend.manager.idle_timeout = self._idle_timeout
         try:
             await backend.refresh()
-            self._ensure_same_speakers(backend)
-            synced = await self._copy_user_dict(backend)
-        except BackendIncompatible:
-            await backend.close()
-            raise
+            missing = await self._missing_models(backend)
+            if not missing:
+                self._ensure_same_speakers(backend)
+                synced = await self._copy_user_dict(backend)
         except Exception as exc:
             await backend.close()
             raise BackendUnreachable(str(exc)) from exc
+        if not missing:
+            self._activate(backend)
+            logger.info("バックエンドを追加: %s（計 %d 台、辞書 %d 語をコピー）", url, len(self._backends), synced)
+            return {"url": url, "state": "active", "synced_words": synced}
+
+        # モデルが足りない
+        names = [m["name"] for m in missing]
+        shown = "、".join(names[:5]) + (f" ほか{len(names) - 5}件" if len(names) > 5 else "")
+        src = settings.models_source_dir
+        files_ok = bool(src) and all(Path(src, f"{m['uuid']}.aivmx").is_file() for m in missing)
+        if not files_ok:
+            await backend.close()
+            why = ("モデルの自動同期が設定されていません（MODELS_SOURCE_DIR）" if not src
+                   else "同期元にモデルファイルが見つかりません")
+            raise BackendIncompatible(
+                f"新しい台に、既存の台にあるモデルがありません（{shown}）。{why}。"
+                "エンジンのデータフォルダを既存の台からコピーしてから追加してください"
+            )
+        self._pending[norm] = {
+            "backend": backend, "state": "syncing", "done": 0, "total": len(missing),
+            "current": names[0], "error": None,
+            "words_state": "waiting", "words_total": None,
+            "task": asyncio.create_task(self._sync_job(norm, backend, missing)),
+        }
+        logger.info("バックエンドの同期を開始: %s（モデル %d 件）", url, len(missing))
+        return {"url": url, "state": "syncing", "missing_models": len(missing)}
+
+    def _activate(self, backend: "Backend") -> None:
         self._backends = [*self._backends, backend]
         self._rebuild_cycle()
         self._save_urls()
-        logger.info("バックエンドを追加: %s（計 %d 台、辞書 %d 語をコピー）", url, len(self._backends), synced)
-        return {"url": url, "synced_words": synced}
+
+    async def _missing_models(self, new: "Backend") -> list[dict]:
+        """最初の台にあって新しい台に無いモデル（uuid と名前）。"""
+        ref = await self._backends[0].client.get_models()
+        have = await new.client.get_models()
+        out = []
+        for uuid, info in ref.items():
+            if uuid not in have:
+                name = (info.get("manifest") or {}).get("name") or uuid
+                out.append({"uuid": uuid, "name": name})
+        return out
+
+    async def _sync_job(self, key: str, backend: "Backend", missing: list[dict]) -> None:
+        """モデルを1つずつ送り込み、辞書をコピーしてから振り分けに加える（裏で動く）。"""
+        entry = self._pending[key]
+        try:
+            words = await self._backends[0].client.get_user_dict(enable_compound_accent=True)
+            entry["words_total"] = len(words)
+            for m in missing:
+                entry["current"] = m["name"]
+                await backend.client.install_model_file(str(Path(settings.models_source_dir, f"{m['uuid']}.aivmx")))
+                entry["done"] += 1
+                logger.info("モデルを同期: %s → %s（%d/%d）", m["name"], backend.url, entry["done"], entry["total"])
+            entry["current"] = None
+            await backend.refresh()
+            self._ensure_same_speakers(backend)
+            entry["words_state"] = "syncing"
+            synced = await self._copy_user_dict(backend)
+            entry["words_state"] = "done"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("バックエンドの同期に失敗: %s: %s", backend.url, exc)
+            entry["state"] = "failed"
+            entry["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            return
+        self._pending.pop(key, None)
+        self._activate(backend)
+        logger.info("同期が完了し振り分けに追加: %s（計 %d 台、辞書 %d 語）", backend.url, len(self._backends), synced)
 
     def _ensure_same_speakers(self, new: "Backend") -> None:
         """最初の台にある話者（スタイル）が、新しい台にもすべてあることを確認する。"""
@@ -624,10 +713,7 @@ class BackendPool:
         missing = [name for sid, name in ref.items() if sid not in new.manager._style_names]
         if missing:
             shown = "、".join(missing[:5]) + (f" ほか{len(missing) - 5}件" if len(missing) > 5 else "")
-            raise BackendIncompatible(
-                f"新しい台に、既存の台にあるモデルがありません（{shown}）。"
-                "エンジンのデータフォルダを既存の台からコピーしてから追加してください"
-            )
+            raise BackendIncompatible(f"新しい台に、既存の台にある話者がありません（{shown}）")
 
     async def _copy_user_dict(self, new: "Backend") -> int:
         words = await self._backends[0].client.get_user_dict(enable_compound_accent=True)
@@ -638,7 +724,14 @@ class BackendPool:
     async def remove_backend(self, url: str) -> None:
         if self.is_cloud:
             raise NotImplementedError("Aivis Cloud では台の削除はできません")
-        target = next((b for b in self._backends if b.url.rstrip("/") == url.rstrip("/")), None)
+        key = url.rstrip("/")
+        if key in self._pending:  # 同期中・同期失敗の台は取り消せる
+            entry = self._pending.pop(key)
+            entry["task"].cancel()
+            await entry["backend"].close()
+            logger.info("同期中のバックエンドを取り消し: %s", url)
+            return
+        target = next((b for b in self._backends if b.url.rstrip("/") == key), None)
         if target is None:
             raise KeyError(url)
         if len(self._backends) <= 1:

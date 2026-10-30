@@ -7,6 +7,8 @@ services:
       - .env
     volumes:
       - ./data:/data
+      # 台の追加時に不足モデル(.aivmx)を配る元（エンジンのModelsディレクトリを読み取り専用で）
+      - ${MODELS_SOURCE_HOST_DIR:-./data/models-src}:/models:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

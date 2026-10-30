@@ -108,6 +108,17 @@ class AivisClient:
         )
         r.raise_for_status()
 
+    async def install_model_file(self, path: str) -> None:
+        """`.aivmx` ファイルをこの台にインストールする（ファイルはストリーミングで送る）。"""
+        import os
+        with open(path, "rb") as f:
+            r = await self._client.post(
+                f"{self.base_url}/aivm_models/install",
+                files={"file": (os.path.basename(path), f, "application/octet-stream")},
+                timeout=900.0,
+            )
+        r.raise_for_status()
+
     async def import_user_dict(self, words: dict, override: bool = True) -> None:
         """`/user_dict` で得た単語一式を、UUID を保ったまま取り込む。"""
         r = await self._client.post(

@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # 設定画面から編集した台の一覧の保存先。ファイルがあれば AIVIS_BACKEND_URLS より優先する。
     backends_file: str = "/data/backends.json"
 
+    # 台を追加するとき、足りないモデル(.aivmx)をここから新しい台へ送り込む。
+    # 既存の台のモデルフォルダを読み取り専用でマウントして指定する。空なら自動同期はしない。
+    models_source_dir: str = ""
+
     # 管理系 API（/backends）を使うためのトークン。空なら管理系 API は無効（403）。
     admin_token: str = ""
 

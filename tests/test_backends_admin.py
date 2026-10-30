@@ -18,6 +18,10 @@ from app.config import settings
 
 STYLES = {1: "A（ノーマル）", 2: "A（あまあま）"}
 WORDS = {"u1": {"surface": ["猫"], "pronunciation": ["ネコ"]}, "u2": {"surface": ["犬"], "pronunciation": ["イヌ"]}}
+MODELS = {"m1": {"manifest": {"name": "まお"}}, "m2": {"manifest": {"name": "コハク"}}}
+MODELS_BY_URL: dict = {}   # url -> インストール済みモデル（無ければ全部入り）
+INSTALLED: list = []
+INSTALL_DELAY = [0.0]   # 同期中の状態を観測したいテストだけ遅くする
 IMPORTED: list = []
 TOKEN = "test-admin-token"
 H = {"X-Admin-Token": TOKEN}
@@ -32,8 +36,7 @@ def _fake_engines(monkeypatch):
         return {"url": url, "ok": True, "latency_ms": 12, "speakers": 3}
 
     async def fake_refresh(self):
-        # URL に partial を含む台は、既存の台より話者が足りない
-        self.manager._style_names = {1: "A（ノーマル）"} if "partial" in self.url else dict(STYLES)
+        self.manager._style_names = dict(STYLES)
 
     async def fake_close(self):
         return None
@@ -46,7 +49,20 @@ def _fake_engines(monkeypatch):
         if "dictfail" in self.base_url:
             raise RuntimeError("import failed")
 
-    IMPORTED.clear()
+    async def fake_get_models(self):
+        return dict(MODELS_BY_URL.get(self.base_url, MODELS))
+
+    async def fake_install(self, path):
+        import asyncio
+        await asyncio.sleep(INSTALL_DELAY[0])
+        INSTALLED.append((self.base_url, path))
+        if "installfail" in self.base_url:
+            raise RuntimeError("install failed")
+        MODELS_BY_URL.setdefault(self.base_url, {})[path.rsplit("/", 1)[-1].removesuffix(".aivmx")] = {}
+
+    INSTALL_DELAY[0] = 0.0; IMPORTED.clear(); INSTALLED.clear(); MODELS_BY_URL.clear()
+    monkeypatch.setattr(AivisClient, "get_models", fake_get_models)
+    monkeypatch.setattr(AivisClient, "install_model_file", fake_install)
     monkeypatch.setattr(AivisClient, "get_user_dict", fake_get_dict)
     monkeypatch.setattr(AivisClient, "import_user_dict", fake_import)
     monkeypatch.setattr(BackendPool, "probe", staticmethod(fake_probe))
@@ -237,35 +253,114 @@ async def test_usage_counters_follow_synthesis(client, monkeypatch):
 
 # --- モデル・辞書の同期 -------------------------------------------------------
 
+async def _wait_synced(pool, timeout=2.0):
+    import asyncio
+    for _ in range(int(timeout / 0.02)):
+        if not any(p["state"] == "syncing" for p in pool._pending.values()):
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("同期が終わりません")
+
+
+@pytest.fixture()
+def source_dir(tmp_path, monkeypatch):
+    d = tmp_path / "models"
+    d.mkdir()
+    for u in MODELS:
+        (d / f"{u}.aivmx").write_bytes(b"x")
+    monkeypatch.setattr(settings, "models_source_dir", str(d))
+    return d
+
+
 @pytest.mark.asyncio
-async def test_add_copies_user_dict_to_new_backend(client):
+async def test_add_with_all_models_goes_active_and_copies_dict(client):
     r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
     assert r.status_code == 201
-    assert r.json()["added"]["synced_words"] == 2
+    assert r.json()["added"] == {"url": "http://192.168.0.22:10101", "state": "active", "synced_words": 2}
     base, words, override = IMPORTED[0]
     assert base == "http://192.168.0.22:10101" and set(words) == {"u1", "u2"} and override is True
+    assert len(client.pool._backends) == 2
 
 
 @pytest.mark.asyncio
-async def test_add_rejects_backend_missing_models(client):
-    # 既存の台にだけある話者（新しい台には無い）を作る
-    client.pool._backends[0].manager._style_names = {**STYLES, 9: "B（ノーマル）"}
+async def test_missing_models_rejected_without_source_dir(client, monkeypatch):
+    monkeypatch.setattr(settings, "models_source_dir", "")
+    MODELS_BY_URL["http://192.168.0.23:10101"] = {"m1": {}}
     r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.23:10101"})
     assert r.status_code == 422
-    assert "B（ノーマル）" in r.json()["detail"] and "モデル" in r.json()["detail"]
-    assert len(client.pool._backends) == 1  # 追加されていない
-    assert not any(b == "http://192.168.0.23:10101" for b, _, _ in IMPORTED)  # 辞書も送っていない
+    assert "コハク" in r.json()["detail"] and "MODELS_SOURCE_DIR" in r.json()["detail"]
+    assert len(client.pool._backends) == 1 and not client.pool._pending
+    assert IMPORTED == [] and INSTALLED == []
 
 
 @pytest.mark.asyncio
-async def test_add_fails_cleanly_when_dict_copy_fails(client, monkeypatch):
-    async def boom(self, words, override=True):
-        raise RuntimeError("import failed")
-    monkeypatch.setattr(AivisClient, "import_user_dict", boom)
-    r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.24:10101"})
-    assert r.status_code == 502 and "import failed" in r.json()["detail"]
+async def test_missing_models_rejected_when_source_file_absent(client, source_dir):
+    (source_dir / "m2.aivmx").unlink()
+    MODELS_BY_URL["http://192.168.0.23:10101"] = {"m1": {}}
+    r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.23:10101"})
+    assert r.status_code == 422 and "見つかりません" in r.json()["detail"]
+    assert not client.pool._pending
+
+
+@pytest.mark.asyncio
+async def test_lazy_sync_installs_models_then_joins_rotation(client, source_dir):
+    url = "http://192.168.0.23:10101"
+    MODELS_BY_URL[url] = {"m1": {}}          # コハク(m2)だけ足りない
+    INSTALL_DELAY[0] = 0.15
+    r = await client.post("/backends", headers=H, json={"url": url})
+    assert r.status_code == 201
+    assert r.json()["added"]["state"] == "syncing" and r.json()["added"]["missing_models"] == 1
+    # 同期中は振り分けに入らず、状態に出る（URLは認証なしの表示に出ない）
     assert len(client.pool._backends) == 1
-    assert not client.store.exists()  # 保存もされていない
+    st = (await client.get("/backends/status")).json()["backends"]
+    assert st[-1]["state"] == "syncing" and st[-1]["sync_total"] == 1 and "192.168" not in str(st)
+    assert st[-1]["words_state"] in ("waiting", "syncing", "done")
+
+    await _wait_synced(client.pool)
+    assert INSTALLED == [(url, str(source_dir / "m2.aivmx"))]
+    assert [b.url for b in client.pool._backends] == ["http://192.168.0.21:10101", url]
+    assert not client.pool._pending
+    assert any(b == url for b, _, _ in IMPORTED)          # 辞書も入った
+    assert json.loads(client.store.read_text())["urls"][-1] == url
+    st = (await client.get("/backends/status")).json()["backends"]
+    assert all(b["state"] == "active" for b in st)
+
+
+@pytest.mark.asyncio
+async def test_pending_shows_words_progress_in_authed_list(client, source_dir):
+    url = "http://192.168.0.23:10101"
+    MODELS_BY_URL[url] = {}
+    INSTALL_DELAY[0] = 0.1
+    await client.post("/backends", headers=H, json={"url": url})
+    row = (await client.get("/backends", headers=H)).json()["backends"][-1]
+    assert row["url"] == url and row["state"] == "syncing" and row["sync_total"] == 2
+    assert "words_total" in row and "words_state" in row
+    await _wait_synced(client.pool)
+
+
+@pytest.mark.asyncio
+async def test_failed_sync_stays_pending_and_can_be_cancelled(client, source_dir):
+    url = "http://192.168.0.23:10101/installfail".replace("/installfail", "")
+    url = "http://installfail.test:10101"
+    # ホスト名解決が要るので、検証をバイパスして直接 pending を作る代わりに fake を使う
+    import app.backend_pool as bpm
+    async def ok_validate(u):
+        return u
+    bpm_validate = bpm.validate_backend_url
+    bpm.validate_backend_url = ok_validate
+    try:
+        MODELS_BY_URL[url] = {}
+        r = await client.post("/backends", headers=H, json={"url": url})
+        assert r.status_code == 201
+        await _wait_synced(client.pool)
+    finally:
+        bpm.validate_backend_url = bpm_validate
+    row = (await client.get("/backends", headers=H)).json()["backends"][-1]
+    assert row["state"] == "failed" and "install failed" in row["error"]
+    assert len(client.pool._backends) == 1 and not client.store.exists()
+    # 失敗した台は取り消して消せる（最後の1台ルールの対象外）
+    r = await client.delete("/backends", headers=H, params={"url": url})
+    assert r.status_code == 200 and not client.pool._pending
 
 
 @pytest.mark.asyncio
