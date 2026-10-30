@@ -728,6 +728,11 @@ class BackendPool:
         self._backends = [*self._backends, backend]
         self._rebuild_cycle()
         self._save_urls()
+        # 追加直後の最初のリクエストが冷えた台に当たらないよう、裏で温める
+        try:
+            asyncio.get_running_loop().create_task(self._warm_backend(backend))
+        except RuntimeError:
+            pass
 
     async def _missing_models(self, new: "Backend") -> list[dict]:
         """最初の台にあって新しい台に無いモデル（uuid と名前）。"""
@@ -816,33 +821,55 @@ class BackendPool:
         if self.is_cloud:
             await self._backends[0].ensure_user_dictionary()
 
-    async def warmup(self) -> None:
-        """各台のモデルを順番に（1本ずつ）ロードしておく。
+    async def _warm_backend(self, b: "Backend") -> None:
+        """1台ぶん: エンジンの実際のロード状態を取り直し、未ロードのモデルを1本ずつ温める。
 
-        冷えた台に最初のリクエストが当たると、モデルの読み込みで数十秒かかる。
-        4コアの台に同時に読み込ませると過負荷になるため、必ず直列で行う。失敗は記録のみ。
+        ルーターの記憶（ロード済み）がエンジン再起動で古くなっていても、ここで実態に合わせる。
+        台の追加直後・エンジン再起動直後に最初のリクエストが冷えた状態に当たるのを防ぐ。
         """
-        if self.is_cloud:
-            return
-        for b in list(self._backends):
+        lock = getattr(self, "_warm_lock", None)
+        if lock is None:
+            lock = self._warm_lock = asyncio.Lock()
+        async with lock:  # 4コアの台に同時に読み込ませると過負荷になるので全体で直列
             try:
-                speakers = await b.client.get_speakers()
+                await b.refresh()
             except Exception as exc:
-                logger.warning("ウォームアップ: 話者の取得に失敗 %s: %s", b.url, exc)
-                continue
-            for sp in speakers:
-                styles = sp.get("styles") or []
-                if not styles:
+                logger.warning("ウォームアップ: 状態の取得に失敗 %s: %s", b.url, exc)
+                return
+            first_style: dict[str, int] = {}
+            for sid, model in sorted(b.manager._style_to_model.items()):
+                first_style.setdefault(model, sid)
+            skip = getattr(self, "_manual_unloaded", set())
+            for model, sid in first_style.items():
+                if b.manager._loaded.get(model) or model in skip:
                     continue
-                sid = styles[0]["id"]
                 started = time.monotonic()
                 try:
                     await b.manager.ensure_loaded(sid)
                     query = await b.client.audio_query("あ", sid)
                     await b.client.synthesis(sid, query)
-                    logger.info("ウォームアップ完了 %s %s (%.1f 秒)", b.url, sp.get("name"), time.monotonic() - started)
+                    logger.info("ウォームアップ完了 %s %s (%.1f 秒)", b.url, b.style_name(sid), time.monotonic() - started)
                 except Exception as exc:
-                    logger.warning("ウォームアップ失敗 %s %s: %s", b.url, sp.get("name"), exc)
+                    logger.warning("ウォームアップ失敗 %s %s: %s", b.url, b.style_name(sid), exc)
+
+    async def warmup(self) -> None:
+        """全台を順番に温める（起動時）。"""
+        if self.is_cloud:
+            return
+        for b in list(self._backends):
+            await self._warm_backend(b)
+
+    async def keep_warm_loop(self, interval: float = 60.0) -> None:
+        """定期的に各台の状態を見て、冷えている（エンジン再起動など）モデルを温め直す。"""
+        if self.is_cloud:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            for b in list(self._backends):
+                try:
+                    await self._warm_backend(b)
+                except Exception as exc:  # ループは止めない
+                    logger.warning("ウォームアップ巡回で例外 %s: %s", b.url, exc)
 
     async def start_cleanup_loop(self) -> None:
         # Cloud には VRAM の概念が無いのでアンロードのループ自体が不要
@@ -944,6 +971,11 @@ class BackendPool:
                     b.manager._loaded[aivm_uuid] = False
                     b.manager._last_used.pop(aivm_uuid, None)
                     unloaded.append(b.url)
+        if unloaded:
+            # 手動で解放したモデルを、巡回ウォームアップが勝手に読み直さないようにする
+            if not hasattr(self, "_manual_unloaded"):
+                self._manual_unloaded = set()
+            self._manual_unloaded.add(aivm_uuid)
         return unloaded
 
     # ------------------------------------------------------------------

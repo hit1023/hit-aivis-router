@@ -428,23 +428,50 @@ async def test_master_cannot_be_removed(client):
     assert r.status_code == 200
 
 
-@pytest.mark.asyncio
-async def test_warmup_loads_each_model_sequentially(client):
-    await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+def _stub_engines(client, models):
+    """各台に {model: (style_id, loaded)} を持たせ、読み込み/合成の呼び出し順を記録する。"""
     calls = []
     for b in client.pool._backends:
+        async def refresh(_b=b):
+            pass
         async def ensure(sid, _b=b):
             calls.append(("load", _b.url, sid))
+            _b.manager._loaded[_b.manager._style_to_model[sid]] = True
         async def aq(text, sid, _b=b):
             return {}
         async def syn(sid, q, _b=b):
             calls.append(("syn", _b.url, sid)); return b""
-        async def spk(_b=b):
-            return [{"name": "A", "styles": [{"id": 7}, {"id": 8}]}]
+        b.refresh = refresh
         b.manager.ensure_loaded = ensure
         b.client.audio_query = aq
         b.client.synthesis = syn
-        b.client.get_speakers = spk
+        b.manager._style_to_model = {sid: m for m, (sid, _) in models.items()}
+        b.manager._loaded = {m: loaded for m, (_, loaded) in models.items()}
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_warmup_warms_only_cold_models_sequentially(client):
+    await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+    calls = _stub_engines(client, {"cold": (7, False), "warm": (9, True)})
     await client.pool.warmup()
     assert calls == [("load", "http://192.168.0.21:10101", 7), ("syn", "http://192.168.0.21:10101", 7),
                      ("load", "http://192.168.0.22:10101", 7), ("syn", "http://192.168.0.22:10101", 7)]
+
+
+@pytest.mark.asyncio
+async def test_warmup_rewarms_after_engine_restart(client):
+    calls = _stub_engines(client, {"m": (7, True)})
+    await client.pool.warmup()
+    assert calls == []                              # 温まっていれば何もしない
+    client.pool._backends[0].manager._loaded["m"] = False   # エンジン再起動で未ロードに戻った
+    await client.pool.warmup()
+    assert [c[0] for c in calls] == ["load", "syn"]
+
+
+@pytest.mark.asyncio
+async def test_warmup_skips_manually_unloaded_model(client):
+    calls = _stub_engines(client, {"m": (7, False)})
+    client.pool._manual_unloaded = {"m"}
+    await client.pool.warmup()
+    assert calls == []
