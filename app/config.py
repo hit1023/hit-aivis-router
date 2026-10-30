@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     llm_api_url: str = "http://localhost:11434/v1"
     llm_api_key: str = "ollama"
     llm_model: str = ""  # empty = disabled; e.g. "gemma3", "llama3.2"
+    llm_config_file: str = "/data/llm_config.json"  # 設定画面からの上書き(環境変数より優先)
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

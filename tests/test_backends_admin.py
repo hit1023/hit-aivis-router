@@ -475,3 +475,22 @@ async def test_warmup_skips_manually_unloaded_model(client):
     client.pool._manual_unloaded = {"m"}
     await client.pool.warmup()
     assert calls == []
+
+
+def test_llm_config_roundtrip(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import main
+    monkeypatch.setattr(main.settings, "llm_config_file", str(tmp_path / "llm.json"))
+    monkeypatch.setattr(main.settings, "admin_token", "tok")
+    monkeypatch.setattr(main.settings, "llm_model", "")
+    c = TestClient(main.app)
+    h = {"X-Admin-Token": "tok"}
+    assert c.get("/kana_verify/status").json()["enabled"] is False
+    r = c.put("/llm_config", headers=h, json={"api_url": "http://x/v1", "model": "m", "api_key": "secret"})
+    assert r.status_code == 200 and r.json()["has_key"] is True
+    assert "secret" not in r.text
+    assert c.get("/kana_verify/status").json()["model"] == "m"
+    # キー省略は変更なし
+    c.put("/llm_config", headers=h, json={"api_url": "http://x/v1", "model": "m2"})
+    assert c.get("/llm_config", headers=h).json()["has_key"] is True
+    assert c.put("/llm_config", json={"model": "m"}).status_code in (401, 403)

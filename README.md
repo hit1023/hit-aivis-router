@@ -534,3 +534,12 @@ AIVIS Router (FastAPI)
 ### 初期リリース
 - FastAPI ベースのラッパー API
 - MP3変換・複数バックエンド対応・モデル自動アンロード
+
+## LLM読み判定の設定
+
+読みチェックの「LLMで読みを確認」は OpenAI互換API(`/chat/completions`)を使います。設定は次のどちらか(設定画面の保存値が優先)。
+
+- WebUI「設定」タブ → 「LLM読み判定」(要管理トークン)。`/data/llm_config.json`(権限600)に保存。APIキーは `GET /llm_config` で返しません。
+- 環境変数 `LLM_API_URL` / `LLM_API_KEY` / `LLM_MODEL`
+
+モデル名が空なら無効(`/kana_verify` は 503)。LLMには判定対象の単語のみ送信します。

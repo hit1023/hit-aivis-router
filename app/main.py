@@ -1222,16 +1222,36 @@ class KanaVerifyItem(BaseModel):
     kana: str
 
 
+def _llm_cfg() -> dict:
+    """LLM接続設定。設定画面の保存値(JSON)があれば環境変数より優先する。"""
+    cfg = {
+        "api_url": settings.llm_api_url,
+        "api_key": settings.llm_api_key,
+        "model": settings.llm_model,
+        "source": "env",
+    }
+    try:
+        saved = json.loads(Path(settings.llm_config_file).read_text("utf-8"))
+        for k in ("api_url", "api_key", "model"):
+            if isinstance(saved.get(k), str) and saved[k] != "":
+                cfg[k] = saved[k]
+        cfg["source"] = "settings"
+    except (OSError, ValueError):
+        pass
+    return cfg
+
+
 @app.get(
     "/kana_verify/status",
     summary="LLM読み判定の設定状態",
     tags=["読みチェック"],
 )
 async def kana_verify_status() -> dict:
+    cfg = _llm_cfg()
     return {
-        "enabled": bool(settings.llm_model),
-        "model": settings.llm_model or None,
-        "api_url": settings.llm_api_url,
+        "enabled": bool(cfg["model"]),
+        "model": cfg["model"] or None,
+        "api_url": cfg["api_url"],
     }
 
 
@@ -1241,22 +1261,23 @@ async def kana_verify_status() -> dict:
     description="""
 単語とカナ読みのペアをLLMに渡し、読みが正しいか一括判定します。
 
-`LLM_MODEL` 環境変数が未設定の場合は 503 を返します。
+モデルが未設定（設定画面 or `LLM_MODEL` 環境変数）の場合は 503 を返します。
 """,
     tags=["読みチェック"],
 )
 async def kana_verify_endpoint(items: list[KanaVerifyItem]) -> list[dict]:
-    if not settings.llm_model:
+    cfg = _llm_cfg()
+    if not cfg["model"]:
         raise HTTPException(
             503,
-            detail="LLMが設定されていません。LLM_MODEL 環境変数にモデル名を設定してください（例: gemma3）",
+            detail="LLMが設定されていません。設定タブの「LLM読み判定」でモデル名を設定してください",
         )
     try:
         results = await kana_checker.verify_readings(
             [{"text": it.text, "kana": it.kana} for it in items],
-            api_url=settings.llm_api_url,
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
+            api_url=cfg["api_url"],
+            api_key=cfg["api_key"],
+            model=cfg["model"],
         )
         return results
     except Exception as exc:
@@ -1274,6 +1295,53 @@ def require_admin(x_admin_token: Optional[str] = Header(None)) -> None:
         raise HTTPException(status_code=403, detail="管理機能は無効です（ADMIN_TOKEN が未設定）")
     if not x_admin_token or not hmac.compare_digest(x_admin_token, settings.admin_token):
         raise HTTPException(status_code=401, detail="管理トークンが正しくありません")
+
+
+class LLMConfigRequest(BaseModel):
+    api_url: str = Field("", description="OpenAI互換APIのベースURL（空=未変更）")
+    model: str = Field("", description="モデル名（空にして保存すると無効化）")
+    api_key: Optional[str] = Field(None, description="APIキー。省略=変更しない / 空文字=削除")
+
+
+@app.get(
+    "/llm_config",
+    summary="LLM読み判定の設定（キーは返さない）",
+    tags=["読みチェック"],
+    dependencies=[Depends(require_admin)],
+)
+async def llm_config_get() -> dict:
+    cfg = _llm_cfg()
+    return {
+        "api_url": cfg["api_url"],
+        "model": cfg["model"],
+        "has_key": bool(cfg["api_key"]) and cfg["api_key"] != "ollama",
+        "source": cfg["source"],
+    }
+
+
+@app.put(
+    "/llm_config",
+    summary="LLM読み判定の設定を保存",
+    tags=["読みチェック"],
+    dependencies=[Depends(require_admin)],
+)
+async def llm_config_put(req: LLMConfigRequest) -> dict:
+    cur = _llm_cfg()
+    url = req.api_url.strip() or cur["api_url"]
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(422, detail="API URL は http:// か https:// で始めてください")
+    key = cur["api_key"] if req.api_key is None else (req.api_key.strip() or "ollama")
+    data = {"api_url": url.rstrip("/"), "api_key": key, "model": req.model.strip()}
+    path = Path(settings.llm_config_file)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    except OSError as exc:
+        raise HTTPException(500, detail=f"保存に失敗しました: {exc}")
+    return await llm_config_get()
 
 
 class BackendURLRequest(BaseModel):
