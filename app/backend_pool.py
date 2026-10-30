@@ -1,9 +1,15 @@
 import asyncio
 import hashlib
+import ipaddress
 import itertools
+import json
 import logging
+import socket
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Protocol, Union
+from urllib.parse import urlsplit
 
 from .aivis_client import AivisClient
 from .aivis_cloud_client import AivisCloudClient
@@ -54,6 +60,51 @@ def derive_style_id(speaker_uuid: str, local_style_id: int) -> int:
 # ---------------------------------------------------------------------------
 # バックエンド共通インターフェース
 # ---------------------------------------------------------------------------
+
+class InvalidBackendURL(ValueError):
+    """登録できないバックエンド URL（形式不正・社内ネットワーク外など）。"""
+
+
+class BackendUnreachable(Exception):
+    """バックエンドに接続できない。"""
+
+
+async def validate_backend_url(url: str) -> str:
+    """バックエンド URL を検証して正規化した URL を返す。
+
+    管理 API から任意の URL を登録できると、ルーターが内部ネットワークや
+    クラウドのメタデータ (169.254.x.x) へリクエストを送る踏み台になりうる。
+    そのため http(s) かつ、名前解決した全アドレスがプライベート/ループバックのものだけを許す。
+    """
+    parts = urlsplit((url or "").strip())
+    if parts.scheme not in ("http", "https"):
+        raise InvalidBackendURL("URL は http:// または https:// で始めてください")
+    if not parts.hostname:
+        raise InvalidBackendURL("ホスト名がありません")
+    if parts.username or parts.password:
+        raise InvalidBackendURL("URL に認証情報を含めることはできません")
+    if parts.query or parts.fragment or parts.path not in ("", "/"):
+        raise InvalidBackendURL("パス・クエリを含まない http://ホスト:ポート の形で指定してください")
+    try:
+        port = parts.port
+    except ValueError:
+        raise InvalidBackendURL("ポート番号が不正です") from None
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, parts.hostname, port or (443 if parts.scheme == "https" else 80),
+            0, socket.SOCK_STREAM,
+        )
+    except socket.gaierror:
+        raise InvalidBackendURL(f"ホスト名を解決できません: {parts.hostname}") from None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+            raise InvalidBackendURL(f"登録できないアドレスです: {ip}")
+        if not (ip.is_private or ip.is_loopback):
+            raise InvalidBackendURL(f"社内ネットワーク（プライベートIP）のサーバーのみ登録できます: {ip}")
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+
 
 class SpeechBackend(Protocol):
     """`/speak` から見たバックエンドの最小インターフェース。
@@ -410,8 +461,9 @@ class BackendPool:
     どちらの場合も `/speak` から見た振る舞いは同じ。
     """
 
-    def __init__(self, urls: list[str], idle_timeout: int = 600):
+    def __init__(self, urls: list[str], idle_timeout: int = 600, store_path: Optional[Path] = None):
         self.is_cloud = settings.is_cloud
+        self._store_path = Path(store_path if store_path is not None else settings.backends_file)
         if self.is_cloud:
             if not settings.aivis_cloud_api_key:
                 logger.error(
@@ -426,11 +478,98 @@ class BackendPool:
                 )
             ]
         else:
-            self._backends = [Backend(url) for url in urls]
+            self._backends = [Backend(url) for url in (self._load_saved_urls() or urls)]
             for b in self._backends:
                 b.manager.idle_timeout = idle_timeout
         self._cycle = itertools.cycle(self._backends)
         self._idle_timeout = idle_timeout
+
+    # ------------------------------------------------------------------
+    # 台の管理（設定画面から）
+    # ------------------------------------------------------------------
+
+    def _load_saved_urls(self) -> list[str]:
+        """設定画面で保存した台の一覧。無い・壊れている場合は空（= .env の値を使う）。"""
+        try:
+            data = json.loads(self._store_path.read_text(encoding="utf-8"))
+            urls = [u for u in data.get("urls", []) if isinstance(u, str) and u]
+            if urls:
+                logger.info("保存済みのバックエンド一覧を使用: %s", urls)
+            return urls
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError, AttributeError) as exc:
+            logger.warning("バックエンド一覧の読み込みに失敗（.env の値を使います）: %s", exc)
+            return []
+
+    def _save_urls(self) -> None:
+        self._store_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._store_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"urls": [b.url for b in self._backends]}, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self._store_path)
+
+    def _rebuild_cycle(self) -> None:
+        self._cycle = itertools.cycle(self._backends)
+
+    @staticmethod
+    async def probe(url: str, timeout: float = 5.0) -> dict:
+        """台に接続できるか調べる（登録はしない）。応答時間とスピーカー数を返す。"""
+        client = AivisClient(url)
+        started = time.monotonic()
+        try:
+            speakers = await asyncio.wait_for(client.get_speakers(), timeout)
+            return {"url": url, "ok": True, "latency_ms": round((time.monotonic() - started) * 1000), "speakers": len(speakers)}
+        except Exception as exc:
+            return {"url": url, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        finally:
+            await client.close()
+
+    async def backend_status(self) -> list[dict]:
+        """登録済みの台の状態（死活・応答時間・ロード済みモデル数）。"""
+        if self.is_cloud:
+            return [{"url": self._backends[0].url, "ok": True, "cloud": True}]
+        probes = await asyncio.gather(*(self.probe(b.url) for b in self._backends))
+        out = []
+        for b, pr in zip(self._backends, probes):
+            pr["loaded_models"] = sum(1 for v in b.manager._loaded.values() if v)
+            out.append(pr)
+        return out
+
+    async def add_backend(self, url: str) -> str:
+        if self.is_cloud:
+            raise NotImplementedError("Aivis Cloud では台の追加はできません")
+        url = await validate_backend_url(url)
+        if any(b.url.rstrip("/") == url for b in self._backends):
+            raise InvalidBackendURL("すでに登録されています")
+        result = await self.probe(url)
+        if not result["ok"]:
+            raise BackendUnreachable(result["error"])
+        backend = Backend(url)
+        backend.manager.idle_timeout = self._idle_timeout
+        try:
+            await backend.refresh()
+        except Exception as exc:
+            await backend.close()
+            raise BackendUnreachable(str(exc)) from exc
+        self._backends = [*self._backends, backend]
+        self._rebuild_cycle()
+        self._save_urls()
+        logger.info("バックエンドを追加: %s（計 %d 台）", url, len(self._backends))
+        return url
+
+    async def remove_backend(self, url: str) -> None:
+        if self.is_cloud:
+            raise NotImplementedError("Aivis Cloud では台の削除はできません")
+        target = next((b for b in self._backends if b.url.rstrip("/") == url.rstrip("/")), None)
+        if target is None:
+            raise KeyError(url)
+        if len(self._backends) <= 1:
+            raise InvalidBackendURL("最後の1台は削除できません")
+        self._backends = [b for b in self._backends if b is not target]
+        self._rebuild_cycle()
+        self._save_urls()
+        await target.close()
+        logger.info("バックエンドを削除: %s（計 %d 台）", url, len(self._backends))
 
     def next(self) -> AnyBackend:
         return next(self._cycle)

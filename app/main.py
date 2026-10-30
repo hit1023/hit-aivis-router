@@ -7,7 +7,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Form, HTTPException, Query, UploadFile, File
+import hmac
+
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .audio import wav_to_mp3
 from .backend_pool import (
     BackendPool,
+    BackendUnreachable,
+    InvalidBackendURL,
+    validate_backend_url,
     ModelLoadFailed,
     SpeakerNotFound,
     SynthesisFailed,
@@ -1248,3 +1253,90 @@ async def kana_verify_endpoint(items: list[KanaVerifyItem]) -> list[dict]:
     except Exception as exc:
         logger.error("kana_verify failed: %s", exc)
         raise HTTPException(500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# バックエンド（AivisSpeech Engine の台）の管理
+# ---------------------------------------------------------------------------
+
+def require_admin(x_admin_token: Optional[str] = Header(None)) -> None:
+    """管理系 API 用の認証。ADMIN_TOKEN が未設定なら機能ごと無効にする。"""
+    if not settings.admin_token:
+        raise HTTPException(status_code=403, detail="管理機能は無効です（ADMIN_TOKEN が未設定）")
+    if not x_admin_token or not hmac.compare_digest(x_admin_token, settings.admin_token):
+        raise HTTPException(status_code=401, detail="管理トークンが正しくありません")
+
+
+class BackendURLRequest(BaseModel):
+    url: str = Field(..., description="台の URL（例: http://192.168.0.22:10101）")
+
+
+async def _backends_response() -> dict:
+    return {
+        "provider": "aivis_cloud" if settings.is_cloud else "local",
+        "editable": not settings.is_cloud,
+        "backends": await pool.backend_status(),
+    }
+
+
+@app.get(
+    "/backends",
+    summary="バックエンド一覧と状態",
+    description="登録されている台の URL・死活・応答時間・ロード済みモデル数を返します。`X-Admin-Token` が必要です。",
+    tags=["バックエンド管理"],
+    dependencies=[Depends(require_admin)],
+)
+async def list_backends() -> dict:
+    return await _backends_response()
+
+
+@app.post(
+    "/backends/test",
+    summary="台への接続テスト（登録はしない）",
+    tags=["バックエンド管理"],
+    dependencies=[Depends(require_admin)],
+)
+async def test_backend(req: BackendURLRequest) -> dict:
+    _reject_if_cloud("バックエンドの接続テスト")
+    try:
+        url = await validate_backend_url(req.url)
+    except InvalidBackendURL as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return await pool.probe(url)
+
+
+@app.post(
+    "/backends",
+    status_code=201,
+    summary="台を追加",
+    description="接続できることを確認してから追加し、`/data/backends.json` に保存します。再起動は不要です。",
+    tags=["バックエンド管理"],
+    dependencies=[Depends(require_admin)],
+)
+async def add_backend(req: BackendURLRequest) -> dict:
+    _reject_if_cloud("バックエンドの追加")
+    try:
+        await pool.add_backend(req.url)
+    except InvalidBackendURL as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except BackendUnreachable as exc:
+        raise HTTPException(status_code=502, detail=f"台に接続できませんでした: {exc}")
+    return await _backends_response()
+
+
+@app.delete(
+    "/backends",
+    summary="台を削除",
+    description="最後の1台は削除できません。",
+    tags=["バックエンド管理"],
+    dependencies=[Depends(require_admin)],
+)
+async def remove_backend(url: str = Query(..., description="削除する台の URL")) -> dict:
+    _reject_if_cloud("バックエンドの削除")
+    try:
+        await pool.remove_backend(url)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="その台は登録されていません")
+    except InvalidBackendURL as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return await _backends_response()

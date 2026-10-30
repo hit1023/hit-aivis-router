@@ -57,6 +57,7 @@ cp .env.example .env
 |--------|-------------|------|
 | `AIVIS_BACKEND_URLS` | `http://localhost:10101` | AivisSpeech Engine のURL（複数の場合はカンマ区切り） |
 | `MODEL_IDLE_TIMEOUT` | `600` | モデルの自動アンロードまでの秒数 |
+| `ADMIN_TOKEN` | （空） | バックエンド管理 API 用トークン。空なら `/backends` は無効（403） |
 
 複数バックエンドの例：
 ```env
@@ -72,6 +73,24 @@ AIVIS_BACKEND_URLS=http://192.168.123.103:10101,http://192.168.123.104:10101
 | `AIVIS_CLOUD_MODEL_UUIDS` | （空） | `/speakers` に載せるモデルUUID（カンマ区切り）。空なら人気順で自動取得 |
 | `AIVIS_CLOUD_CATALOG_LIMIT` | `30` | 自動取得するモデル件数 |
 | `AIVIS_CLOUD_USER_DICT_UUID` | （空） | ユーザー辞書UUID。空なら初回起動時に自動生成して `/data` に保存 |
+
+### 台の追加・削除（バックエンド管理）
+
+`ADMIN_TOKEN` を設定すると、WebUI の「🖥 バックエンド」タブ、または API から台を再起動なしで増減できます。
+すべて `X-Admin-Token: <ADMIN_TOKEN>` ヘッダーが必要です。
+
+| メソッド | パス | 内容 |
+|---|---|---|
+| GET | `/backends` | 登録済みの台の URL・死活・応答時間・ロード済みモデル数 |
+| POST | `/backends/test` | `{"url": ...}` の接続テスト（登録はしない） |
+| POST | `/backends` | `{"url": ...}` を追加（接続確認に成功した場合のみ） |
+| DELETE | `/backends?url=...` | 台を削除（最後の1台は不可） |
+
+- 保存先は `/data/backends.json`。**保存後は `.env` の `AIVIS_BACKEND_URLS` より優先**されます（初回だけ初期値として使用）。
+- 登録できるのは社内ネットワーク（プライベート/ループバックIP）の `http(s)://ホスト:ポート` のみ。
+  グローバルIP・メタデータアドレス（169.254.x.x）・パス付きURLは拒否します。
+- `TTS_PROVIDER=aivis_cloud` のときは台の編集はできません（501）。
+- 外部公開している場合は、リバースプロキシ側でも `/backends` に認証や IP 制限を掛けることを推奨します。
 
 ---
 

@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     # カンマ区切りの文字列で受け取りプロパティでリストに変換
     aivis_backend_urls: str = "http://localhost:10101"
     model_idle_timeout: int = 600  # seconds
+    # 設定画面から編集した台の一覧の保存先。ファイルがあれば AIVIS_BACKEND_URLS より優先する。
+    backends_file: str = "/data/backends.json"
+
+    # 管理系 API（/backends）を使うためのトークン。空なら管理系 API は無効（403）。
+    admin_token: str = ""
 
     # --- aivis_cloud 用 ---
     aivis_cloud_api_url: str = "https://api.aivis-project.com"
