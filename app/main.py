@@ -122,12 +122,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Backend initialization failed (will retry on first request): %s", exc)
     cleanup_task = asyncio.create_task(pool.start_cleanup_loop())
+    warmup_task = asyncio.create_task(pool.warmup()) if settings.warmup_on_start and not pool.is_cloud else None
     if pool.is_cloud:
         logger.info("TTS backend: Aivis Cloud API (%s)", settings.aivis_cloud_api_url)
     else:
         logger.info("TTS backend: AivisSpeech Engine %s", settings.backend_urls)
     yield
     cleanup_task.cancel()
+    if warmup_task:
+        warmup_task.cancel()
     await pool.close()
 
 

@@ -426,3 +426,25 @@ async def test_master_cannot_be_removed(client):
     await client.put("/backends/master", headers=H, json={"url": "http://192.168.0.22:10101"})
     r = await client.delete("/backends", headers=H, params={"url": "http://192.168.0.21:10101"})
     assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_warmup_loads_each_model_sequentially(client):
+    await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+    calls = []
+    for b in client.pool._backends:
+        async def ensure(sid, _b=b):
+            calls.append(("load", _b.url, sid))
+        async def aq(text, sid, _b=b):
+            return {}
+        async def syn(sid, q, _b=b):
+            calls.append(("syn", _b.url, sid)); return b""
+        async def spk(_b=b):
+            return [{"name": "A", "styles": [{"id": 7}, {"id": 8}]}]
+        b.manager.ensure_loaded = ensure
+        b.client.audio_query = aq
+        b.client.synthesis = syn
+        b.client.get_speakers = spk
+    await client.pool.warmup()
+    assert calls == [("load", "http://192.168.0.21:10101", 7), ("syn", "http://192.168.0.21:10101", 7),
+                     ("load", "http://192.168.0.22:10101", 7), ("syn", "http://192.168.0.22:10101", 7)]

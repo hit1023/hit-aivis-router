@@ -816,6 +816,34 @@ class BackendPool:
         if self.is_cloud:
             await self._backends[0].ensure_user_dictionary()
 
+    async def warmup(self) -> None:
+        """各台のモデルを順番に（1本ずつ）ロードしておく。
+
+        冷えた台に最初のリクエストが当たると、モデルの読み込みで数十秒かかる。
+        4コアの台に同時に読み込ませると過負荷になるため、必ず直列で行う。失敗は記録のみ。
+        """
+        if self.is_cloud:
+            return
+        for b in list(self._backends):
+            try:
+                speakers = await b.client.get_speakers()
+            except Exception as exc:
+                logger.warning("ウォームアップ: 話者の取得に失敗 %s: %s", b.url, exc)
+                continue
+            for sp in speakers:
+                styles = sp.get("styles") or []
+                if not styles:
+                    continue
+                sid = styles[0]["id"]
+                started = time.monotonic()
+                try:
+                    await b.manager.ensure_loaded(sid)
+                    query = await b.client.audio_query("あ", sid)
+                    await b.client.synthesis(sid, query)
+                    logger.info("ウォームアップ完了 %s %s (%.1f 秒)", b.url, sp.get("name"), time.monotonic() - started)
+                except Exception as exc:
+                    logger.warning("ウォームアップ失敗 %s %s: %s", b.url, sp.get("name"), exc)
+
     async def start_cleanup_loop(self) -> None:
         # Cloud には VRAM の概念が無いのでアンロードのループ自体が不要
         if self.is_cloud:
