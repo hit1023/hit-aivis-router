@@ -34,6 +34,10 @@ def init(db_path: Path) -> None:
                 pause_length_scale REAL
             )
         """)
+        # どの台が応答したか（既存DBには列を足す）
+        cols = {r[1] for r in con.execute("PRAGMA table_info(speech_history)")}
+        if "backend" not in cols:
+            con.execute("ALTER TABLE speech_history ADD COLUMN backend TEXT")
         con.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON speech_history (created_at DESC)")
         con.commit()
     finally:
@@ -52,6 +56,7 @@ def _insert_sync(
     tempo_dynamics: float,
     pause_length: Optional[float],
     pause_length_scale: float,
+    backend: Optional[str] = None,
 ) -> None:
     if _DB_PATH is None:
         return
@@ -64,14 +69,14 @@ def _insert_sync(
               (created_at, speaker_id, speaker_name,
                original_text, processed_text,
                speed, pitch, intonation, volume, tempo_dynamics,
-               pause_length, pause_length_scale)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               pause_length, pause_length_scale, backend)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 created_at, speaker_id, speaker_name,
                 original_text, processed_text,
                 speed, pitch, intonation, volume, tempo_dynamics,
-                pause_length, pause_length_scale,
+                pause_length, pause_length_scale, backend,
             ),
         )
         con.commit()
@@ -91,6 +96,7 @@ async def record(
     tempo_dynamics: float,
     pause_length: Optional[float],
     pause_length_scale: float,
+    backend: Optional[str] = None,
 ) -> None:
     loop = asyncio.get_running_loop()
     try:
@@ -99,7 +105,7 @@ async def record(
             _insert_sync,
             speaker_id, speaker_name, original_text, processed_text,
             speed, pitch, intonation, volume, tempo_dynamics,
-            pause_length, pause_length_scale,
+            pause_length, pause_length_scale, backend,
         )
     except Exception as exc:
         logger.warning("speech_history: failed to record: %s", exc)

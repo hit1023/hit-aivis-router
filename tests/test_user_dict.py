@@ -167,16 +167,17 @@ class TestAddUserDictWord:
 
     @pytest.mark.asyncio
     async def test_default_word_type_and_priority(self, client, mock_pool):
+        # 既存と同じ表記だと上書き更新(upsert)になるので、未登録の語で追加経路を確認する
         payload = {
-            "surface": ["テスト"],
-            "pronunciation": ["テスト"],
+            "surface": ["新しい語"],
+            "pronunciation": ["アタラシイゴ"],
             "accent_type": [2],
         }
         resp = await client.post("/user_dict", json=payload)
         assert resp.status_code == 200
         mock_pool.add_user_dict_word.assert_awaited_once_with(
-            surface=["テスト"],
-            pronunciation=["テスト"],
+            surface=["新しい語"],
+            pronunciation=["アタラシイゴ"],
             accent_type=[2],
             word_type="PROPER_NOUN",
             priority=5,
@@ -269,6 +270,7 @@ class TestBackendPoolMultiBackend:
         client2.add_user_dict_word = AsyncMock(return_value="uuid-from-backend-2")
 
         pool = BackendPool.__new__(BackendPool)
+        pool.is_cloud = False   # __new__ で作ると __init__ の属性が無いので
         backend1 = MagicMock()
         backend1.client = client1
         backend2 = MagicMock()
@@ -297,6 +299,7 @@ class TestBackendPoolMultiBackend:
         client2.update_user_dict_word = AsyncMock()
 
         pool = BackendPool.__new__(BackendPool)
+        pool.is_cloud = False   # __new__ で作ると __init__ の属性が無いので
         backend1 = MagicMock()
         backend1.client = client1
         backend2 = MagicMock()
@@ -324,6 +327,7 @@ class TestBackendPoolMultiBackend:
         client2.delete_user_dict_word = AsyncMock()
 
         pool = BackendPool.__new__(BackendPool)
+        pool.is_cloud = False   # __new__ で作ると __init__ の属性が無いので
         backend1 = MagicMock()
         backend1.client = client1
         backend2 = MagicMock()
@@ -346,6 +350,7 @@ class TestBackendPoolMultiBackend:
         client2.get_user_dict = AsyncMock(return_value={"uuid2": {}})
 
         pool = BackendPool.__new__(BackendPool)
+        pool.is_cloud = False   # __new__ で作ると __init__ の属性が無いので
         backend1 = MagicMock()
         backend1.client = client1
         backend2 = MagicMock()

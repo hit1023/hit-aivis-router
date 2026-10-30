@@ -147,6 +147,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Backend"],
 )
 
 @app.middleware("http")
@@ -264,6 +265,7 @@ class ModelStatus(BaseModel):
 )
 async def speak(req: SpeakRequest):
     backend = pool.next()
+    served_by = getattr(backend, "url", "Aivis Cloud")   # どの台が応答したか
 
     processed_text = replacer.apply(req.text)
     if processed_text != req.text:
@@ -332,9 +334,10 @@ async def speak(req: SpeakRequest):
         tempo_dynamics=tempo_dynamics,
         pause_length=pause_length,
         pause_length_scale=pause_length_scale,
+        backend=served_by,
     ))
 
-    return Response(content=mp3_bytes, media_type="audio/mpeg")
+    return Response(content=mp3_bytes, media_type="audio/mpeg", headers={"X-Backend": served_by})
 
 
 @app.get(
