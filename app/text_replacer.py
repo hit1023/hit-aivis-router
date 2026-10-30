@@ -19,8 +19,9 @@ class TextReplacer:
     def __init__(self, rules_file: Path, seed_file: Path | None = None) -> None:
         self._file = rules_file
         self._rules: dict[str, str] = {}
+        first_run = not rules_file.exists()  # 全削除後(空ファイルあり)は再投入しない
         self._load()
-        if not self._rules and seed_file and seed_file.exists():
+        if first_run and not self._rules and seed_file and seed_file.exists():
             self._seed(seed_file)
 
     # ------------------------------------------------------------------
