@@ -77,10 +77,11 @@ AIVIS_BACKEND_URLS=http://192.168.123.103:10101,http://192.168.123.104:10101
 ### 台の追加・削除（バックエンド管理）
 
 `ADMIN_TOKEN` を設定すると、WebUI の「🖥 バックエンド」タブ、または API から台を再起動なしで増減できます。
-すべて `X-Admin-Token: <ADMIN_TOKEN>` ヘッダーが必要です。
+`/backends/status` 以外は `X-Admin-Token: <ADMIN_TOKEN>` ヘッダーが必要です。
 
 | メソッド | パス | 内容 |
 |---|---|---|
+| GET | `/backends/status` | **認証不要**。台の番号・死活・応答時間・ロード済みモデル数・処理件数・直近の合成時間（URL は含まない。カウンタは再起動でリセット） |
 | GET | `/backends` | 登録済みの台の URL・死活・応答時間・ロード済みモデル数 |
 | POST | `/backends/test` | `{"url": ...}` の接続テスト（登録はしない） |
 | POST | `/backends` | `{"url": ...}` を追加（接続確認に成功した場合のみ） |

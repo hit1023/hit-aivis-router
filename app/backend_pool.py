@@ -6,6 +6,7 @@ import json
 import logging
 import socket
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol, Union
@@ -129,12 +130,29 @@ class Backend:
     url: str
     client: AivisClient = field(init=False)
     manager: ModelManager = field(init=False)
+    # 画面表示用の統計（メモリ上のみ。再起動でリセットされる）
+    requests: int = 0
+    errors: int = 0
+    last_used: Optional[float] = None
+    recent_ms: deque = field(default_factory=lambda: deque(maxlen=20))
 
     def __post_init__(self):
         self.client = AivisClient(self.url)
         self.manager = ModelManager(self.client)
 
     async def synthesize_mp3(self, text: str, speaker_id: int, params: dict) -> bytes:
+        started = time.monotonic()
+        self.requests += 1
+        self.last_used = time.time()
+        try:
+            result = await self._synthesize_mp3(text, speaker_id, params)
+        except Exception:
+            self.errors += 1
+            raise
+        self.recent_ms.append(round((time.monotonic() - started) * 1000))
+        return result
+
+    async def _synthesize_mp3(self, text: str, speaker_id: int, params: dict) -> bytes:
         """モデルをロードしてから `/audio_query` → `/synthesis` を叩き、MP3 に変換して返す。"""
         try:
             await self.manager.ensure_loaded(speaker_id)
@@ -532,7 +550,36 @@ class BackendPool:
         out = []
         for b, pr in zip(self._backends, probes):
             pr["loaded_models"] = sum(1 for v in b.manager._loaded.values() if v)
+            pr.update(self._usage(b))
             out.append(pr)
+        return out
+
+    @staticmethod
+    def _usage(b: "Backend") -> dict:
+        recent = list(b.recent_ms)
+        return {
+            "requests": b.requests,
+            "errors": b.errors,
+            "last_used": b.last_used,
+            "avg_ms": round(sum(recent) / len(recent)) if recent else None,
+            "recent_ms": recent,
+        }
+
+    async def public_status(self) -> list[dict]:
+        """認証不要の状態表示用。URL（社内IP）は含めず、台の番号だけで返す。"""
+        if self.is_cloud:
+            return [{"index": 1, "ok": True, "cloud": True}]
+        probes = await asyncio.gather(*(self.probe(b.url) for b in self._backends))
+        out = []
+        for i, (b, pr) in enumerate(zip(self._backends, probes), start=1):
+            out.append({
+                "index": i,
+                "ok": pr["ok"],
+                "latency_ms": pr.get("latency_ms"),
+                "speakers": pr.get("speakers"),
+                "loaded_models": sum(1 for v in b.manager._loaded.values() if v),
+                **self._usage(b),
+            })
         return out
 
     async def add_backend(self, url: str) -> str:

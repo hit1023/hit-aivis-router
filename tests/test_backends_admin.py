@@ -182,3 +182,37 @@ async def test_test_endpoint(client):
     assert r.status_code == 200 and r.json()["ok"] is True
     assert (await client.post("/backends/test", json={"url": "http://8.8.8.8"}, headers=H)).status_code == 422
     assert not client.store.exists()  # テストでは保存されない
+
+
+# --- 稼働状況（認証不要） ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_public_status_needs_no_token_and_hides_urls(client):
+    r = await client.get("/backends/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "192.168" not in r.text
+    b = body["backends"][0]
+    assert b["index"] == 1 and b["ok"] is True and b["latency_ms"] == 12
+    assert b["requests"] == 0 and b["errors"] == 0 and b["recent_ms"] == []
+
+
+@pytest.mark.asyncio
+async def test_usage_counters_follow_synthesis(client, monkeypatch):
+    backend = client.pool._backends[0]
+
+    async def ok(self, text, speaker_id, params):
+        return b"mp3"
+
+    async def ng(self, text, speaker_id, params):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bp.Backend, "_synthesize_mp3", ok)
+    await backend.synthesize_mp3("a", 1, {})
+    monkeypatch.setattr(bp.Backend, "_synthesize_mp3", ng)
+    with pytest.raises(RuntimeError):
+        await backend.synthesize_mp3("b", 1, {})
+
+    b = (await client.get("/backends/status")).json()["backends"][0]
+    assert b["requests"] == 2 and b["errors"] == 1
+    assert len(b["recent_ms"]) == 1 and b["last_used"] is not None

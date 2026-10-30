@@ -1280,6 +1280,19 @@ async def _backends_response() -> dict:
 
 
 @app.get(
+    "/backends/status",
+    summary="台の稼働状況（認証不要・URLなし）",
+    description="台の番号・死活・応答時間・ロード済みモデル数・処理件数を返します。URL は含みません（再起動でカウンタはリセット）。",
+    tags=["バックエンド管理"],
+)
+async def backends_status() -> dict:
+    return {
+        "provider": "aivis_cloud" if settings.is_cloud else "local",
+        "backends": await pool.public_status(),
+    }
+
+
+@app.get(
     "/backends",
     summary="バックエンド一覧と状態",
     description="登録されている台の URL・死活・応答時間・ロード済みモデル数を返します。`X-Admin-Token` が必要です。",
