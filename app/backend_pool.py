@@ -66,6 +66,10 @@ class InvalidBackendURL(ValueError):
     """登録できないバックエンド URL（形式不正・社内ネットワーク外など）。"""
 
 
+class BackendIncompatible(InvalidBackendURL):
+    """新しい台に、既存の台にあるモデル（話者）が揃っていない。"""
+
+
 class BackendUnreachable(Exception):
     """バックエンドに接続できない。"""
 
@@ -582,7 +586,12 @@ class BackendPool:
             })
         return out
 
-    async def add_backend(self, url: str) -> str:
+    async def add_backend(self, url: str) -> dict:
+        """台を追加する。戻り値は `{"url": 正規化したURL, "synced_words": 辞書からコピーした単語数}`。
+
+        ルーターは台ごとのモデルを複製できないので、既存の台にある話者が新しい台に
+        すべてあることを確認する。辞書は最初の台から新しい台へコピーする（UUID は保つ）。
+        """
         if self.is_cloud:
             raise NotImplementedError("Aivis Cloud では台の追加はできません")
         url = await validate_backend_url(url)
@@ -595,14 +604,36 @@ class BackendPool:
         backend.manager.idle_timeout = self._idle_timeout
         try:
             await backend.refresh()
+            self._ensure_same_speakers(backend)
+            synced = await self._copy_user_dict(backend)
+        except BackendIncompatible:
+            await backend.close()
+            raise
         except Exception as exc:
             await backend.close()
             raise BackendUnreachable(str(exc)) from exc
         self._backends = [*self._backends, backend]
         self._rebuild_cycle()
         self._save_urls()
-        logger.info("バックエンドを追加: %s（計 %d 台）", url, len(self._backends))
-        return url
+        logger.info("バックエンドを追加: %s（計 %d 台、辞書 %d 語をコピー）", url, len(self._backends), synced)
+        return {"url": url, "synced_words": synced}
+
+    def _ensure_same_speakers(self, new: "Backend") -> None:
+        """最初の台にある話者（スタイル）が、新しい台にもすべてあることを確認する。"""
+        ref = self._backends[0].manager._style_names
+        missing = [name for sid, name in ref.items() if sid not in new.manager._style_names]
+        if missing:
+            shown = "、".join(missing[:5]) + (f" ほか{len(missing) - 5}件" if len(missing) > 5 else "")
+            raise BackendIncompatible(
+                f"新しい台に、既存の台にあるモデルがありません（{shown}）。"
+                "エンジンのデータフォルダを既存の台からコピーしてから追加してください"
+            )
+
+    async def _copy_user_dict(self, new: "Backend") -> int:
+        words = await self._backends[0].client.get_user_dict(enable_compound_accent=True)
+        if words:
+            await new.client.import_user_dict(words, override=True)
+        return len(words)
 
     async def remove_backend(self, url: str) -> None:
         if self.is_cloud:

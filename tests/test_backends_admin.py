@@ -12,9 +12,13 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app import backend_pool as bp
+from app.aivis_client import AivisClient
 from app.backend_pool import BackendPool, InvalidBackendURL, validate_backend_url
 from app.config import settings
 
+STYLES = {1: "A（ノーマル）", 2: "A（あまあま）"}
+WORDS = {"u1": {"surface": ["猫"], "pronunciation": ["ネコ"]}, "u2": {"surface": ["犬"], "pronunciation": ["イヌ"]}}
+IMPORTED: list = []
 TOKEN = "test-admin-token"
 H = {"X-Admin-Token": TOKEN}
 
@@ -28,11 +32,23 @@ def _fake_engines(monkeypatch):
         return {"url": url, "ok": True, "latency_ms": 12, "speakers": 3}
 
     async def fake_refresh(self):
-        return None
+        # URL に partial を含む台は、既存の台より話者が足りない
+        self.manager._style_names = {1: "A（ノーマル）"} if "partial" in self.url else dict(STYLES)
 
     async def fake_close(self):
         return None
 
+    async def fake_get_dict(self, enable_compound_accent=False):
+        return dict(WORDS)
+
+    async def fake_import(self, words, override=True):
+        IMPORTED.append((self.base_url, dict(words), override))
+        if "dictfail" in self.base_url:
+            raise RuntimeError("import failed")
+
+    IMPORTED.clear()
+    monkeypatch.setattr(AivisClient, "get_user_dict", fake_get_dict)
+    monkeypatch.setattr(AivisClient, "import_user_dict", fake_import)
     monkeypatch.setattr(BackendPool, "probe", staticmethod(fake_probe))
     monkeypatch.setattr(bp.Backend, "refresh", fake_refresh)
     monkeypatch.setattr(bp.Backend, "close", fake_close)
@@ -44,6 +60,7 @@ async def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "admin_token", TOKEN)
     from app import main as m
     m.pool = BackendPool(["http://192.168.0.21:10101"], store_path=tmp_path / "backends.json")
+    m.pool._backends[0].manager._style_names = dict(STYLES)
     async with AsyncClient(transport=ASGITransport(app=m.app), base_url="http://test") as ac:
         ac.pool = m.pool
         ac.store = tmp_path / "backends.json"
@@ -216,3 +233,46 @@ async def test_usage_counters_follow_synthesis(client, monkeypatch):
     b = (await client.get("/backends/status")).json()["backends"][0]
     assert b["requests"] == 2 and b["errors"] == 1
     assert len(b["recent_ms"]) == 1 and b["last_used"] is not None
+
+
+# --- モデル・辞書の同期 -------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_add_copies_user_dict_to_new_backend(client):
+    r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+    assert r.status_code == 201
+    assert r.json()["added"]["synced_words"] == 2
+    base, words, override = IMPORTED[0]
+    assert base == "http://192.168.0.22:10101" and set(words) == {"u1", "u2"} and override is True
+
+
+@pytest.mark.asyncio
+async def test_add_rejects_backend_missing_models(client):
+    # 既存の台にだけある話者（新しい台には無い）を作る
+    client.pool._backends[0].manager._style_names = {**STYLES, 9: "B（ノーマル）"}
+    r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.23:10101"})
+    assert r.status_code == 422
+    assert "B（ノーマル）" in r.json()["detail"] and "モデル" in r.json()["detail"]
+    assert len(client.pool._backends) == 1  # 追加されていない
+    assert not any(b == "http://192.168.0.23:10101" for b, _, _ in IMPORTED)  # 辞書も送っていない
+
+
+@pytest.mark.asyncio
+async def test_add_fails_cleanly_when_dict_copy_fails(client, monkeypatch):
+    async def boom(self, words, override=True):
+        raise RuntimeError("import failed")
+    monkeypatch.setattr(AivisClient, "import_user_dict", boom)
+    r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.24:10101"})
+    assert r.status_code == 502 and "import failed" in r.json()["detail"]
+    assert len(client.pool._backends) == 1
+    assert not client.store.exists()  # 保存もされていない
+
+
+@pytest.mark.asyncio
+async def test_empty_dict_is_not_imported(client, monkeypatch):
+    async def empty(self, enable_compound_accent=False):
+        return {}
+    monkeypatch.setattr(AivisClient, "get_user_dict", empty)
+    r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+    assert r.status_code == 201 and r.json()["added"]["synced_words"] == 0
+    assert IMPORTED == []

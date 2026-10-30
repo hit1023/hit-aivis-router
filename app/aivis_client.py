@@ -108,6 +108,16 @@ class AivisClient:
         )
         r.raise_for_status()
 
+    async def import_user_dict(self, words: dict, override: bool = True) -> None:
+        """`/user_dict` で得た単語一式を、UUID を保ったまま取り込む。"""
+        r = await self._client.post(
+            f"{self.base_url}/import_user_dict",
+            params={"override": str(override).lower()},
+            json=words,
+            timeout=60.0,
+        )
+        r.raise_for_status()
+
     async def uninstall_model(self, aivm_uuid: str) -> None:
         """指定UUIDのモデルをアンインストールする。"""
         r = await self._client.delete(

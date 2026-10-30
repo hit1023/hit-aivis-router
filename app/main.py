@@ -1322,19 +1322,19 @@ async def test_backend(req: BackendURLRequest) -> dict:
     "/backends",
     status_code=201,
     summary="台を追加",
-    description="接続できることを確認してから追加し、`/data/backends.json` に保存します。再起動は不要です。",
+    description="接続・モデル（話者）の揃い具合を確認し、最初の台のユーザー辞書をコピーしてから追加します。`/data/backends.json` に保存され、再起動は不要です。",
     tags=["バックエンド管理"],
     dependencies=[Depends(require_admin)],
 )
 async def add_backend(req: BackendURLRequest) -> dict:
     _reject_if_cloud("バックエンドの追加")
     try:
-        await pool.add_backend(req.url)
+        added = await pool.add_backend(req.url)
     except InvalidBackendURL as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except BackendUnreachable as exc:
         raise HTTPException(status_code=502, detail=f"台に接続できませんでした: {exc}")
-    return await _backends_response()
+    return {**await _backends_response(), "added": added}
 
 
 @app.delete(
