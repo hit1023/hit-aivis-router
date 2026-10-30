@@ -260,14 +260,17 @@ class TestBackendPoolMultiBackend:
     """BackendPool が全バックエンドへ書き込みを行うことを確認する。"""
 
     @pytest.mark.asyncio
-    async def test_add_word_syncs_to_all_backends(self):
-        """add_user_dict_word は全バックエンドの client を呼び出す。"""
+    async def test_add_word_goes_to_master_then_followers_keep_uuid(self):
+        """add_user_dict_word はマスターに先に入れ、その UUID のまま他の台へ取り込ませる。"""
         from app.backend_pool import BackendPool
 
+        word = {"surface": "テスト", "pronunciation": "テスト", "accent_type": 2}
         client1 = MagicMock()
-        client1.add_user_dict_word = AsyncMock(return_value="uuid-from-backend-1")
+        client1.add_user_dict_word = AsyncMock(return_value="uuid-from-master")
+        client1.get_user_dict = AsyncMock(return_value={"uuid-from-master": word, "other": {}})
         client2 = MagicMock()
-        client2.add_user_dict_word = AsyncMock(return_value="uuid-from-backend-2")
+        client2.add_user_dict_word = AsyncMock()
+        client2.import_user_dict = AsyncMock()
 
         pool = BackendPool.__new__(BackendPool)
         pool.is_cloud = False   # __new__ で作ると __init__ の属性が無いので
@@ -283,20 +286,22 @@ class TestBackendPoolMultiBackend:
             accent_type=[2],
         )
 
-        # 最初のバックエンドの UUID が返る
-        assert result == "uuid-from-backend-1"
+        assert result == "uuid-from-master"
         client1.add_user_dict_word.assert_awaited_once()
-        client2.add_user_dict_word.assert_awaited_once()
+        client2.add_user_dict_word.assert_not_awaited()   # 台ごとに別UUIDを発行させない
+        client2.import_user_dict.assert_awaited_once_with({"uuid-from-master": word}, override=True)
 
     @pytest.mark.asyncio
-    async def test_update_word_syncs_to_all_backends(self):
-        """update_user_dict_word は全バックエンドの client を呼び出す。"""
+    async def test_update_word_goes_to_master_then_followers(self):
+        """update_user_dict_word はマスターを更新し、他の台へ同じ UUID で反映する。"""
         from app.backend_pool import BackendPool
 
+        word = {"surface": "テスト"}
         client1 = MagicMock()
         client1.update_user_dict_word = AsyncMock()
+        client1.get_user_dict = AsyncMock(return_value={"some-uuid": word})
         client2 = MagicMock()
-        client2.update_user_dict_word = AsyncMock()
+        client2.import_user_dict = AsyncMock()
 
         pool = BackendPool.__new__(BackendPool)
         pool.is_cloud = False   # __new__ で作ると __init__ の属性が無いので
@@ -314,7 +319,7 @@ class TestBackendPoolMultiBackend:
         )
 
         client1.update_user_dict_word.assert_awaited_once()
-        client2.update_user_dict_word.assert_awaited_once()
+        client2.import_user_dict.assert_awaited_once_with({"some-uuid": word}, override=True)
 
     @pytest.mark.asyncio
     async def test_delete_word_syncs_to_all_backends(self):

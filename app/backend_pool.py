@@ -501,6 +501,7 @@ class BackendPool:
             ]
         else:
             self._backends = [Backend(url) for url in (self._load_saved_urls() or urls)]
+            self._master_url: Optional[str] = self._load_saved_master()
             for b in self._backends:
                 b.manager.idle_timeout = idle_timeout
         self._cycle = itertools.cycle(self._backends)
@@ -526,11 +527,69 @@ class BackendPool:
             logger.warning("バックエンド一覧の読み込みに失敗（.env の値を使います）: %s", exc)
             return []
 
+    def _load_saved_master(self) -> Optional[str]:
+        try:
+            m = json.loads(self._store_path.read_text(encoding="utf-8")).get("master")
+            return m if isinstance(m, str) and m else None
+        except (OSError, ValueError, AttributeError):
+            return None
+
     def _save_urls(self) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._store_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"urls": [b.url for b in self._backends]}, ensure_ascii=False, indent=2), encoding="utf-8")
+        data = {"urls": [b.url for b in self._backends]}
+        if getattr(self, "_master_url", None):
+            data["master"] = self._master_url
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._store_path)
+
+    # ------------------------------------------------------------------
+    # マスター台
+    #
+    # 「基準になる台」。モデルの有無（話者）・ユーザー辞書の正はマスターで、
+    # 単語の登録/更新/削除とモデルのインストールはマスターに先に入れ、
+    # 他の台はそれに追従させる。未指定なら先頭の台がマスター。
+    # ------------------------------------------------------------------
+
+    @property
+    def master(self) -> "Backend":
+        m = getattr(self, "_master_url", None)
+        if m:
+            found = next((b for b in self._backends if b.url.rstrip("/") == m.rstrip("/")), None)
+            if found is not None:
+                return found
+        return self._backends[0]
+
+    def _followers(self) -> list:
+        m = self.master
+        return [b for b in self._backends if b is not m]
+
+    async def set_master(self, url: str) -> dict:
+        """マスター台を変える。新しいマスターの辞書を他の台へ反映する。"""
+        if self.is_cloud:
+            raise NotImplementedError("Aivis Cloud ではマスターは使えません")
+        key = url.rstrip("/")
+        target = next((b for b in self._backends if b.url.rstrip("/") == key), None)
+        if target is None:
+            raise KeyError(url)
+        self._master_url = target.url
+        self._save_urls()
+        logger.info("マスター台を変更: %s", target.url)
+        return {"master": target.url, "dict": await self._propagate_dict()}
+
+    async def _propagate_dict(self) -> dict:
+        """マスターの辞書を、他の台へ UUID を保ったまま取り込ませる（失敗した台は結果に残す）。"""
+        words = await self.master.client.get_user_dict(enable_compound_accent=True)
+        results = {"words": len(words), "failed": []}
+        if not words:
+            return results
+        for b in self._followers():
+            try:
+                await b.client.import_user_dict(words, override=True)
+            except Exception as exc:
+                logger.error("辞書の反映に失敗 %s: %s", b.url, exc)
+                results["failed"].append(b.url)
+        return results
 
     def _rebuild_cycle(self) -> None:
         self._cycle = itertools.cycle(self._backends)
@@ -576,6 +635,7 @@ class BackendPool:
         for b, pr in zip(self._backends, probes):
             pr["loaded_models"] = sum(1 for v in b.manager._loaded.values() if v)
             pr["state"] = "active"
+            pr["master"] = b is self.master
             pr.update(self._usage(b))
             out.append(pr)
         return out + self._pending_view(True, len(out) + 1)
@@ -601,6 +661,7 @@ class BackendPool:
             out.append({
                 "index": i,
                 "state": "active",
+                "master": b is self.master,
                 "ok": pr["ok"],
                 "latency_ms": pr.get("latency_ms"),
                 "speakers": pr.get("speakers"),
@@ -709,14 +770,14 @@ class BackendPool:
 
     def _ensure_same_speakers(self, new: "Backend") -> None:
         """最初の台にある話者（スタイル）が、新しい台にもすべてあることを確認する。"""
-        ref = self._backends[0].manager._style_names
+        ref = self.master.manager._style_names
         missing = [name for sid, name in ref.items() if sid not in new.manager._style_names]
         if missing:
             shown = "、".join(missing[:5]) + (f" ほか{len(missing) - 5}件" if len(missing) > 5 else "")
             raise BackendIncompatible(f"新しい台に、既存の台にある話者がありません（{shown}）")
 
     async def _copy_user_dict(self, new: "Backend") -> int:
-        words = await self._backends[0].client.get_user_dict(enable_compound_accent=True)
+        words = await self.master.client.get_user_dict(enable_compound_accent=True)
         if words:
             await new.client.import_user_dict(words, override=True)
         return len(words)
@@ -736,6 +797,8 @@ class BackendPool:
             raise KeyError(url)
         if len(self._backends) <= 1:
             raise InvalidBackendURL("最後の1台は削除できません")
+        if target is self.master:
+            raise InvalidBackendURL("マスターの台は削除できません。先に別の台をマスターにしてください")
         self._backends = [b for b in self._backends if b is not target]
         self._rebuild_cycle()
         self._save_urls()
@@ -746,7 +809,7 @@ class BackendPool:
         return next(self._cycle)
 
     def resolve_speaker_name(self, speaker_id: int) -> Optional[str]:
-        return self._backends[0].style_name(speaker_id) if self._backends else None
+        return self.master.style_name(speaker_id) if self._backends else None
 
     async def initialize(self) -> None:
         await asyncio.gather(*(b.refresh() for b in self._backends))
@@ -830,7 +893,7 @@ class BackendPool:
         if self.is_cloud:
             raise NotImplementedError("Aivis Cloud ではモデルのインストールはできません")
         results = []
-        for b in self._backends:
+        for b in [self.master, *self._followers()]:
             try:
                 await b.client.install_model(filename, data)
                 results.append({"backend_url": b.url, "success": True})
@@ -859,11 +922,12 @@ class BackendPool:
     # ユーザー辞書
     # ------------------------------------------------------------------
 
+
     async def get_user_dict(self, enable_compound_accent: bool = False) -> dict:
         """最初のバックエンドからユーザー辞書を取得する。"""
         if self.is_cloud:
             return await self._backends[0].get_user_dict(enable_compound_accent)
-        return await self._backends[0].client.get_user_dict(enable_compound_accent)
+        return await self.master.client.get_user_dict(enable_compound_accent)
 
     async def add_user_dict_word(
         self,
@@ -878,15 +942,26 @@ class BackendPool:
             return await self._backends[0].add_user_dict_word(
                 surface, pronunciation, accent_type, word_type, priority
             )
-        word_uuid: str | None = None
-        for i, b in enumerate(self._backends):
-            result = await b.client.add_user_dict_word(
-                surface, pronunciation, accent_type, word_type, priority
-            )
-            if i == 0:
-                word_uuid = result
-        assert word_uuid is not None
+        # マスターに先に入れ、発行された UUID のまま他の台へ取り込ませる（台ごとに UUID が
+        # 食い違うと、あとの更新・削除が他の台で失敗するため）
+        word_uuid = await self.master.client.add_user_dict_word(
+            surface, pronunciation, accent_type, word_type, priority
+        )
+        await self._follow_words({word_uuid})
         return word_uuid
+
+    async def _follow_words(self, uuids: set[str]) -> None:
+        """マスターにある指定の単語を、他の台へ UUID を保ったまま反映する（失敗は記録のみ）。"""
+        followers = self._followers()
+        if not followers:
+            return
+        words = await self.master.client.get_user_dict(enable_compound_accent=True)
+        part = {u: w for u, w in words.items() if u in uuids}
+        for b in followers:
+            try:
+                await b.client.import_user_dict(part, override=True)
+            except Exception as exc:
+                logger.error("単語の反映に失敗 %s: %s", b.url, exc)
 
     async def update_user_dict_word(
         self,
@@ -903,25 +978,22 @@ class BackendPool:
                 word_uuid, surface, pronunciation, accent_type, word_type, priority
             )
             return
-        await asyncio.gather(
-            *(
-                b.client.update_user_dict_word(
-                    word_uuid, surface, pronunciation, accent_type, word_type, priority
-                )
-                for b in self._backends
-            ),
-            return_exceptions=False,
+        await self.master.client.update_user_dict_word(
+            word_uuid, surface, pronunciation, accent_type, word_type, priority
         )
+        await self._follow_words({word_uuid})
 
     async def delete_user_dict_word(self, word_uuid: str) -> None:
         """全バックエンドから単語を削除する。"""
         if self.is_cloud:
             await self._backends[0].delete_user_dict_word(word_uuid)
             return
-        await asyncio.gather(
-            *(b.client.delete_user_dict_word(word_uuid) for b in self._backends),
-            return_exceptions=False,
-        )
+        await self.master.client.delete_user_dict_word(word_uuid)
+        for b in self._followers():
+            try:
+                await b.client.delete_user_dict_word(word_uuid)
+            except Exception as exc:
+                logger.error("単語の削除の反映に失敗 %s: %s", b.url, exc)
 
     def cloud_backend(self) -> Optional[CloudBackend]:
         """Cloud モードのときだけ CloudBackend を返す（辞書 UUID の注入用）。"""

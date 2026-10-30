@@ -149,6 +149,7 @@ async def test_add_when_engine_down_returns_502(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_remove(client):
     await client.post("/backends", json={"url": "http://192.168.0.22:10101"}, headers=H)
+    await client.put("/backends/master", json={"url": "http://192.168.0.22:10101"}, headers=H)
     r = await client.delete("/backends", params={"url": "http://192.168.0.21:10101"}, headers=H)
     assert r.status_code == 200
     assert [b["url"] for b in r.json()["backends"]] == ["http://192.168.0.22:10101"]
@@ -371,3 +372,57 @@ async def test_empty_dict_is_not_imported(client, monkeypatch):
     r = await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
     assert r.status_code == 201 and r.json()["added"]["synced_words"] == 0
     assert IMPORTED == []
+
+
+# --- マスター台 --------------------------------------------------------------
+
+async def _two(client):
+    await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+    assert len(client.pool._backends) == 2
+
+
+@pytest.mark.asyncio
+async def test_first_backend_is_master_by_default(client):
+    await _two(client)
+    rows = (await client.get("/backends", headers=H)).json()["backends"]
+    assert [r["master"] for r in rows] == [True, False]
+    pub = (await client.get("/backends/status")).json()["backends"]
+    assert [r["master"] for r in pub] == [True, False] and "192.168" not in str(pub)
+
+
+@pytest.mark.asyncio
+async def test_set_master_persists_and_propagates_dict(client):
+    await _two(client)
+    IMPORTED.clear()
+    r = await client.put("/backends/master", headers=H, json={"url": "http://192.168.0.22:10101"})
+    assert r.status_code == 200 and r.json()["master"] == "http://192.168.0.22:10101"
+    assert [b["master"] for b in r.json()["backends"]] == [False, True]
+    assert json.loads(client.store.read_text())["master"] == "http://192.168.0.22:10101"
+    # 新しいマスターの辞書が、他の台へUUIDのまま反映される
+    assert [(u, set(w)) for u, w, _ in IMPORTED] == [("http://192.168.0.21:10101", {"u1", "u2"})]
+    assert client.pool.master.url == "http://192.168.0.22:10101"
+
+
+@pytest.mark.asyncio
+async def test_master_survives_restart(client, tmp_path):
+    await _two(client)
+    await client.put("/backends/master", headers=H, json={"url": "http://192.168.0.22:10101"})
+    again = BackendPool(["http://192.168.0.21:10101"], store_path=client.store)
+    assert again.master.url == "http://192.168.0.22:10101"
+
+
+@pytest.mark.asyncio
+async def test_set_master_unknown_and_auth(client):
+    assert (await client.put("/backends/master", json={"url": "http://192.168.0.21:10101"})).status_code == 401
+    r = await client.put("/backends/master", headers=H, json={"url": "http://192.168.0.99:10101"})
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_master_cannot_be_removed(client):
+    await _two(client)
+    r = await client.delete("/backends", headers=H, params={"url": "http://192.168.0.21:10101"})
+    assert r.status_code == 409 and "マスター" in r.json()["detail"]
+    await client.put("/backends/master", headers=H, json={"url": "http://192.168.0.22:10101"})
+    r = await client.delete("/backends", headers=H, params={"url": "http://192.168.0.21:10101"})
+    assert r.status_code == 200

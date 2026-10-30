@@ -1340,6 +1340,26 @@ async def add_backend(req: BackendURLRequest) -> dict:
     return {**await _backends_response(), "added": added}
 
 
+class MasterRequest(BaseModel):
+    url: str
+
+
+@app.put(
+    "/backends/master",
+    summary="マスター台を指定",
+    description="モデルと辞書の基準にする台を指定します。単語の登録・更新・削除とモデルのインストールはマスターに先に行い、他の台が追従します。切り替え時は新しいマスターの辞書を他の台へ反映します。",
+    tags=["バックエンド管理"],
+    dependencies=[Depends(require_admin)],
+)
+async def set_master(req: MasterRequest) -> dict:
+    _reject_if_cloud("マスターの指定")
+    try:
+        result = await pool.set_master(req.url)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="その台は登録されていません")
+    return {**await _backends_response(), "master": result["master"], "dict": result["dict"]}
+
+
 @app.delete(
     "/backends",
     summary="台を削除",
