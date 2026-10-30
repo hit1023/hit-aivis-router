@@ -3,7 +3,12 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         wget \
+        nodejs \
+        npm \
     && rm -rf /var/lib/apt/lists/*
+
+# 読みチェックのLLM判定用に Claude Code (ヘッドレス)を同梱
+RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 
 WORKDIR /srv
 

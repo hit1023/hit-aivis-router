@@ -543,3 +543,7 @@ AIVIS Router (FastAPI)
 - 環境変数 `LLM_API_URL` / `LLM_API_KEY` / `LLM_MODEL`
 
 モデル名が空なら無効(`/kana_verify` は 503)。LLMには判定対象の単語のみ送信します。
+
+### Claude Code ヘッドレス方式（クレジット節約設計）
+
+方式に `claude_cli` を選ぶと、コンテナ内の `claude -p` で判定します（イメージに Claude Code を同梱）。トークン欄には `claude setup-token` の OAuth トークンを入れます（従量課金のAPIキーではなくサブスク枠を消費）。節約策: haiku・ツール/MCP/スキル/設定読込をすべて無効化・最小システムプロンプト・単語ごとの結果を `/data/kana_llm_cache.json` にキャッシュ（同じ単語は再問い合わせしない）・複数単語を1回の呼び出しに集約。

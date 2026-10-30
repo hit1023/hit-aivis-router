@@ -1228,11 +1228,12 @@ def _llm_cfg() -> dict:
         "api_url": settings.llm_api_url,
         "api_key": settings.llm_api_key,
         "model": settings.llm_model,
+        "provider": "openai",
         "source": "env",
     }
     try:
         saved = json.loads(Path(settings.llm_config_file).read_text("utf-8"))
-        for k in ("api_url", "api_key", "model"):
+        for k in ("api_url", "api_key", "model", "provider"):
             if isinstance(saved.get(k), str) and saved[k] != "":
                 cfg[k] = saved[k]
         cfg["source"] = "settings"
@@ -1252,6 +1253,7 @@ async def kana_verify_status() -> dict:
         "enabled": bool(cfg["model"]),
         "model": cfg["model"] or None,
         "api_url": cfg["api_url"],
+        "provider": cfg["provider"],
     }
 
 
@@ -1278,6 +1280,8 @@ async def kana_verify_endpoint(items: list[KanaVerifyItem]) -> list[dict]:
             api_url=cfg["api_url"],
             api_key=cfg["api_key"],
             model=cfg["model"],
+            provider=cfg["provider"],
+            cache_file=str(Path(settings.llm_config_file).with_name("kana_llm_cache.json")),
         )
         return results
     except Exception as exc:
@@ -1298,6 +1302,7 @@ def require_admin(x_admin_token: Optional[str] = Header(None)) -> None:
 
 
 class LLMConfigRequest(BaseModel):
+    provider: str = Field("openai", description="openai（OpenAI互換API）/ claude_cli（Claude Code ヘッドレス）")
     api_url: str = Field("", description="OpenAI互換APIのベースURL（空=未変更）")
     model: str = Field("", description="モデル名（空にして保存すると無効化）")
     api_key: Optional[str] = Field(None, description="APIキー。省略=変更しない / 空文字=削除")
@@ -1314,6 +1319,7 @@ async def llm_config_get() -> dict:
     return {
         "api_url": cfg["api_url"],
         "model": cfg["model"],
+        "provider": cfg["provider"],
         "has_key": bool(cfg["api_key"]) and cfg["api_key"] != "ollama",
         "source": cfg["source"],
     }
@@ -1327,11 +1333,13 @@ async def llm_config_get() -> dict:
 )
 async def llm_config_put(req: LLMConfigRequest) -> dict:
     cur = _llm_cfg()
+    if req.provider not in ("openai", "claude_cli"):
+        raise HTTPException(422, detail="provider は openai か claude_cli です")
     url = req.api_url.strip() or cur["api_url"]
     if not url.startswith(("http://", "https://")):
         raise HTTPException(422, detail="API URL は http:// か https:// で始めてください")
     key = cur["api_key"] if req.api_key is None else (req.api_key.strip() or "ollama")
-    data = {"api_url": url.rstrip("/"), "api_key": key, "model": req.model.strip()}
+    data = {"api_url": url.rstrip("/"), "api_key": key, "model": req.model.strip(), "provider": req.provider}
     path = Path(settings.llm_config_file)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -494,3 +494,21 @@ def test_llm_config_roundtrip(tmp_path, monkeypatch):
     c.put("/llm_config", headers=h, json={"api_url": "http://x/v1", "model": "m2"})
     assert c.get("/llm_config", headers=h).json()["has_key"] is True
     assert c.put("/llm_config", json={"model": "m"}).status_code in (401, 403)
+
+
+def test_kana_verify_cache_skips_llm(tmp_path, monkeypatch):
+    import asyncio
+    from app import kana_checker
+    calls = []
+
+    async def fake(words, *a, **k):
+        calls.append(list(words))
+        return [{"text": w, "reading": "テスト"} for w in words]
+
+    monkeypatch.setattr(kana_checker, "_ask_claude_cli", fake)
+    cf = str(tmp_path / "c.json")
+    pairs = [{"text": "試験", "kana": "テスト"}, {"text": "試験", "kana": "テスト"}]
+    r1 = asyncio.run(kana_checker.verify_readings(pairs, provider="claude_cli", cache_file=cf))
+    r2 = asyncio.run(kana_checker.verify_readings(pairs, provider="claude_cli", cache_file=cf))
+    assert len(calls) == 1 and calls[0] == ["試験"]
+    assert r1 == r2 and r1[0]["correct"] is True
