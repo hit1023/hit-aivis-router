@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import hashlib
 import ipaddress
 import itertools
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # 例外（main.py 側で HTTP ステータスへ対応づける）
 # ---------------------------------------------------------------------------
+
+# 台が不調になったとき、振り分けから外しておく秒数
+BACKEND_COOLDOWN_SEC = 30.0
+
+
+def _is_node_fault(exc: BaseException) -> bool:
+    """原因が台の不調（接続できない・タイムアウト・5xx）か。リクエスト自体の不備（4xx等）は除く。"""
+    cause = exc.__cause__ or exc
+    if isinstance(cause, httpx.TransportError):
+        return True
+    return isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code >= 500
+
 
 class SpeakerNotFound(Exception):
     """指定されたスタイル ID がこのバックエンドに存在しない（→ 404）。"""
@@ -139,6 +152,11 @@ class Backend:
     errors: int = 0
     last_used: Optional[float] = None
     recent_ms: deque = field(default_factory=lambda: deque(maxlen=20))
+    # この時刻(monotonic)まで振り分けから外す（不調だった台の一時退避）
+    cooldown_until: float = 0.0
+
+    def in_cooldown(self) -> bool:
+        return self.cooldown_until > time.monotonic()
 
     def __post_init__(self):
         self.client = AivisClient(self.url)
@@ -150,9 +168,14 @@ class Backend:
         self.last_used = time.time()
         try:
             result = await self._synthesize_mp3(text, speaker_id, params)
-        except Exception:
+        except Exception as exc:
             self.errors += 1
+            if not isinstance(exc, SpeakerNotFound) and _is_node_fault(exc):
+                exc.node_fault = True
+                self.cooldown_until = time.monotonic() + BACKEND_COOLDOWN_SEC
+                logger.warning("%s を %d 秒間 振り分けから外します: %s", self.url, BACKEND_COOLDOWN_SEC, exc)
             raise
+        self.cooldown_until = 0.0
         self.recent_ms.append(round((time.monotonic() - started) * 1000))
         return result
 
@@ -634,6 +657,8 @@ class BackendPool:
         out = []
         for b, pr in zip(self._backends, probes):
             pr["loaded_models"] = sum(1 for v in b.manager._loaded.values() if v)
+            if pr.get("ok"):
+                b.cooldown_until = 0.0
             pr["state"] = "active"
             pr["master"] = b is self.master
             pr.update(self._usage(b))
@@ -811,7 +836,23 @@ class BackendPool:
         logger.info("バックエンドを削除: %s（計 %d 台）", url, len(self._backends))
 
     def next(self) -> AnyBackend:
-        return next(self._cycle)
+        """順番に台を返す。不調で退避中の台は飛ばす（全台が退避中なら通常の順番）。"""
+        if len(self._backends) <= 1:
+            return next(self._cycle)
+        first = None
+        for _ in range(len(self._backends)):
+            b = next(self._cycle)
+            if not getattr(b, "in_cooldown", lambda: False)():
+                return b
+            first = first or b
+        return first
+
+    def pick_other(self, failed: AnyBackend) -> Optional[AnyBackend]:
+        """失敗した台以外から、やり直し先を1台選ぶ。元気な台を優先し、いなければ None。"""
+        others = [b for b in self._backends if b is not failed]
+        healthy = [b for b in others if not getattr(b, "in_cooldown", lambda: False)()]
+        pool = healthy or []
+        return pool[0] if pool else None
 
     def resolve_speaker_name(self, speaker_id: int) -> Optional[str]:
         return self.master.style_name(speaker_id) if self._backends else None

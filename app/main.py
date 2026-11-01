@@ -308,20 +308,26 @@ async def speak(req: SpeakRequest):
     # 実際の合成はバックエンド（ローカルの AivisSpeech Engine / Aivis Cloud API）に委ねる。
     # ここから下はどちらのバックエンドでも共通の処理なので、テキスト置換・プリセット・
     # 発話履歴は TTS_PROVIDER を切り替えても同じように効く。
+    synth_params = {
+        "speed": speed,
+        "pitch": pitch,
+        "intonation": intonation,
+        "volume": volume,
+        "tempo_dynamics": tempo_dynamics,
+        "pause_length": pause_length,
+        "pause_length_scale": pause_length_scale,
+    }
     try:
-        mp3_bytes = await backend.synthesize_mp3(
-            processed_text,
-            req.speaker_id,
-            {
-                "speed": speed,
-                "pitch": pitch,
-                "intonation": intonation,
-                "volume": volume,
-                "tempo_dynamics": tempo_dynamics,
-                "pause_length": pause_length,
-                "pause_length_scale": pause_length_scale,
-            },
-        )
+        try:
+            mp3_bytes = await backend.synthesize_mp3(processed_text, req.speaker_id, synth_params)
+        except (ModelLoadFailed, SynthesisFailed) as first_exc:
+            # 台の不調（接続不可・タイムアウト・5xx）なら、別の台で1回だけやり直す
+            alt = pool.pick_other(backend) if getattr(first_exc, "node_fault", False) else None
+            if alt is None:
+                raise
+            logger.warning("%s で失敗したため %s で再試行します: %s", served_by, alt.url, first_exc)
+            served_by = alt.url
+            mp3_bytes = await alt.synthesize_mp3(processed_text, req.speaker_id, synth_params)
     except SpeakerNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ModelLoadFailed as exc:

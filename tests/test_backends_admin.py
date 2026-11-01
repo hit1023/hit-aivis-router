@@ -552,3 +552,58 @@ async def test_install_publishes_progress_events(client, monkeypatch):
     assert got[0] == ("start", None)
     assert ("node", "started") in got and ("node", "done") in got
     assert got[-1] == ("finish", None)
+
+
+# --- 不調な台の退避・やり直し --------------------------------------------------
+
+def _two_backend_pool(tmp_path, monkeypatch):
+    import httpx
+    from app import backend_pool as bp
+    pool = BackendPool(["http://good.test:10101", "http://bad.test:10101"], store_path=tmp_path / "b.json")
+
+    async def fake(self, text, speaker_id, params):
+        if "bad" in self.url:
+            raise bp.SynthesisFailed("synthesis failed") from httpx.ConnectError("down")
+        return b"mp3-from-" + self.url.encode()
+    monkeypatch.setattr(bp.Backend, "_synthesize_mp3", fake)
+    return pool
+
+
+@pytest.mark.asyncio
+async def test_failed_backend_is_skipped_for_cooldown(tmp_path, monkeypatch):
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    bad = next(b for b in pool._backends if "bad" in b.url)
+    params = {"speed": 1, "pitch": 0, "intonation": 1, "volume": 1, "tempo_dynamics": 1, "pause_length_scale": 1}
+    with pytest.raises(Exception) as ei:
+        await bad.synthesize_mp3("a", 1, params)
+    assert ei.value.node_fault is True and bad.in_cooldown()
+    assert all("good" in pool.next().url for _ in range(6))   # 退避中は選ばれない
+    assert pool.pick_other(bad).url.startswith("http://good")
+
+
+@pytest.mark.asyncio
+async def test_all_in_cooldown_falls_back_to_rotation(tmp_path, monkeypatch):
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    import time as _t
+    for b in pool._backends:
+        b.cooldown_until = _t.monotonic() + 60
+    assert pool.next() is not None
+
+
+@pytest.mark.asyncio
+async def test_speak_retries_on_other_backend(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app import main as m, speech_history
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    # 最初に bad が選ばれる順にしておく
+    pool._backends.sort(key=lambda b: "bad" not in b.url)
+    pool._rebuild_cycle()
+    monkeypatch.setattr(m, "pool", pool, raising=False)
+    monkeypatch.setattr(m, "replacer", SimpleNamespace(apply=lambda t: t), raising=False)
+    monkeypatch.setattr(m, "presets", SimpleNamespace(get=lambda i: None), raising=False)
+    async def noop(**kw): pass
+    monkeypatch.setattr(speech_history, "record", noop)
+    async with AsyncClient(transport=ASGITransport(app=m.app), base_url="http://test") as ac:
+        r = await ac.post("/speak", json={"text": "こんにちは", "speaker_id": 1})
+    assert r.status_code == 200
+    assert r.headers["X-Backend"].startswith("http://good")
