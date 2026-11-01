@@ -22,3 +22,10 @@ def test_long_sentence_split_on_comma():
 def test_empty_and_no_punctuation():
     assert split_sentences("  ") == []
     assert split_sentences("こんにちは") == ["こんにちは"]
+
+
+def test_long_first_sentence_cut_once_at_first_comma():
+    t = "あと、この表記も今回の実装でただのノイズになってしまうので、別の表現にしてほしいですね。次の文です。"
+    parts = split_sentences(t)
+    assert parts[0] == "あと、この表記も今回の実装でただのノイズになってしまうので、"
+    assert "".join(parts) == t
