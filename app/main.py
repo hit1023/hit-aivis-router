@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import uuid
@@ -28,6 +29,7 @@ from .backend_pool import (
     SynthesisFailed,
 )
 from .events import bus
+from .splitter import split_sentences
 from .config import settings
 from .speaker_preset import SpeakerPresetManager
 from .text_replacer import TextReplacer
@@ -282,6 +284,12 @@ async def speak(req: SpeakRequest, request: Request, x_session_id: Optional[str]
     # 同じセッションは、前に成功した台を使い続ける（台が変わると初回だけ遅くなるため）。
     # セッションは X-Session-Id、無ければ接続元 IP（NPM 経由なら X-Forwarded-For の先頭）。
     session = (x_session_id or "").strip()[:128] or _client_key(request)
+    mp3_bytes, served_by = await _speak_core(req, session)
+    return Response(content=mp3_bytes, media_type="audio/mpeg", headers={"X-Backend": served_by})
+
+
+async def _speak_core(req: SpeakRequest, session: str) -> tuple[bytes, str]:
+    """1 件分の合成（/speak と /speak_stream で共通）。(mp3, 応答した台) を返す。"""
     backend = pool.pick(session, req.speaker_id)
     served_by = getattr(backend, "url", "Aivis Cloud")   # どの台が応答したか
 
@@ -363,7 +371,48 @@ async def speak(req: SpeakRequest, request: Request, x_session_id: Optional[str]
         backend=served_by,
     ))
 
-    return Response(content=mp3_bytes, media_type="audio/mpeg", headers={"X-Backend": served_by})
+    return mp3_bytes, served_by
+
+
+class SpeakStreamRequest(SpeakRequest):
+    max_len: int = Field(60, ge=10, le=300, description="1 文の最大文字数。超えた分は読点で区切る")
+
+
+@app.post(
+    "/speak_stream",
+    summary="音声合成（文ごとに逐次返却）",
+    description="""
+テキストを文ごとに分けて合成し、**できた文から順に** NDJSON（1 行 1 JSON）で返します。
+
+各行: `{"i": 0, "n": 3, "text": "文", "audio": "<MP3 の base64>", "backend": "台"}`
+失敗したときは `{"error": "..."}` の行で終わります。
+
+先頭の文が出来次第再生を始めれば、長文でも体感の待ち時間が最初の 1 文ぶんになります。
+合成は同じセッション・同じ台で順番に行うので、「1 モデル 1 ノード」の方針は崩れません。
+""",
+    tags=["音声合成"],
+)
+async def speak_stream(req: SpeakStreamRequest, request: Request, x_session_id: Optional[str] = Header(default=None)):
+    session = (x_session_id or "").strip()[:128] or _client_key(request)
+    sentences = split_sentences(replacer.apply(req.text), max_len=req.max_len) or [req.text]
+    base = req.model_dump(exclude={"max_len"})
+
+    async def gen():
+        n = len(sentences)
+        for i, sent in enumerate(sentences):
+            try:
+                mp3, served_by = await _speak_core(SpeakRequest(**{**base, "text": sent}), session)
+            except SpeakerNotFound as exc:
+                yield json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n"
+                return
+            except (ModelLoadFailed, SynthesisFailed) as exc:
+                logger.error("stream synthesis failed: %s", exc)
+                yield json.dumps({"error": "音声合成に失敗しました"}, ensure_ascii=False) + "\n"
+                return
+            yield json.dumps({"i": i, "n": n, "text": sent, "backend": served_by,
+                              "audio": base64.b64encode(mp3).decode()}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson", headers={"X-Accel-Buffering": "no"})
 
 
 @app.get(

@@ -587,3 +587,10 @@ time.sleep(600)"
 4. 話者が分からない場合のみ、セッション（`X-Session-Id`、無ければ接続元 IP）が前に成功した台、無ければ通常のラウンドロビンです。
 
 トレードオフ: 同じ話者への要求は 1 台に集まります。複数の話者を使えば台に分散します。
+
+## 文ごとの逐次返却（/speak_stream）
+
+CPU 合成は長文だと数秒かかるので、`POST /speak_stream` は文ごとに合成し、できた文から NDJSON（1 行 1 JSON）で返します。
+`/speak` と同じ本文に `max_len`（既定 60）を足せます。各行は `{"i","n","text","backend","audio"(MP3 の base64)}`、失敗時は `{"error"}` の行で終わります。
+文の区切りは `app/splitter.py`（`。！？`・改行、短い断片は次へ連結、長い文は読点で分割）。合成は同じ台で順番に行うので「1 モデル 1 ノード」は崩れません。
+利用側の例は `hit-aivis-webui`（Generate）と `hit-orb-hologram`（`docs/TTS_STREAMING.md`）。

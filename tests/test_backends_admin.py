@@ -802,3 +802,22 @@ async def test_rebalance_moves_models_to_emptier_backend(client):
     assert sorted(unloaded) == sorted(m["model"] for m in moved)
     assert sum(a.manager._loaded.values()) == 2 and sum(b.manager._loaded.values()) == 2
     assert not any(a.manager._loaded[m] and b.manager._loaded[m] for m in "abcd")   # 重複なし
+
+
+def test_speak_stream_returns_sentences_in_order(monkeypatch):
+    import json as _json
+    from fastapi.testclient import TestClient
+    from app import main
+
+    calls = []
+
+    async def fake_core(req, session):
+        calls.append(req.text)
+        return b"MP3:" + req.text.encode(), "http://node"
+
+    monkeypatch.setattr(main, "_speak_core", fake_core)
+    monkeypatch.setattr(main, "replacer", type("R", (), {"apply": staticmethod(lambda t: t)})(), raising=False)
+    r = TestClient(main.app).post("/speak_stream", json={"text": "今日はいい天気ですね。散歩に行きましょう。", "speaker_id": 1})
+    lines = [_json.loads(x) for x in r.text.strip().splitlines()]
+    assert [l["i"] for l in lines] == [0, 1] and all(l["n"] == 2 for l in lines)
+    assert calls == ["今日はいい天気ですね。", "散歩に行きましょう。"]
