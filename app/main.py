@@ -1574,6 +1574,19 @@ async def set_backend_enabled(req: EnabledRequest) -> dict:
     return {**await _backends_response(), "added": added}
 
 
+@app.post(
+    "/backends/rebalance",
+    summary="ロード済みモデルを台の間で均す",
+    description="ロード済みモデルの数が偏っているとき、多い台から少ない台へモデルを移します（少ない台に載せて温めてから、多い台で降ろします）。同じモデルが2台に載ることはありません。",
+    tags=["バックエンド管理"],
+    dependencies=[Depends(require_admin)],
+)
+async def rebalance_backends() -> dict:
+    _reject_if_cloud("再配置")
+    moved = await pool.rebalance()
+    return {"moved": moved}
+
+
 @app.delete(
     "/backends",
     summary="台を削除",

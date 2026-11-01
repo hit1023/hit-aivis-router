@@ -782,3 +782,23 @@ async def test_dedupe_unloads_duplicates_keeps_first(client):
     assert dropped[0][0] == "http://192.168.0.22:10101"      # 2台目から降ろす
     assert client.pool._backends[0].manager._loaded["m"] is True
     assert client.pool._backends[1].manager._loaded["m"] is False
+
+
+@pytest.mark.asyncio
+async def test_rebalance_moves_models_to_emptier_backend(client):
+    await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+    calls = _stub_engines(client, {"a": (1, True), "b": (2, True), "c": (3, True), "d": (4, True)})
+    a, b = client.pool._backends
+    for m in "abcd":                                   # b 側は未ロード（インストール済み）
+        b.manager._loaded[m] = False
+    unloaded = []
+
+    async def fake_unload(self, uuid):
+        unloaded.append(uuid)
+    from app.aivis_client import AivisClient
+    pytest.MonkeyPatch().setattr(AivisClient, "unload_model", fake_unload)
+    moved = await client.pool.rebalance()
+    assert len(moved) == 2 and all(m["to"] == "http://192.168.0.22:10101" for m in moved)
+    assert sorted(unloaded) == sorted(m["model"] for m in moved)
+    assert sum(a.manager._loaded.values()) == 2 and sum(b.manager._loaded.values()) == 2
+    assert not any(a.manager._loaded[m] and b.manager._loaded[m] for m in "abcd")   # 重複なし

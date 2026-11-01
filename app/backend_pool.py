@@ -1108,6 +1108,46 @@ class BackendPool:
             logger.info("重複ロードを解消: %d 本を降ろしました", len(dropped))
         return dropped
 
+    async def rebalance(self) -> list[dict]:
+        """ロード済みモデルの数が偏っているとき、多い台から少ない台へモデルを移す。
+
+        多い台で降ろし、少ない台に載せて温める。差が1以下になるまで繰り返す。
+        使える台が2台未満なら何もしない。移した内容（model / from / to）を返す。
+        """
+        if self.is_cloud:
+            return []
+        moved: list[dict] = []
+        for _ in range(64):  # 念のための上限
+            usable = [b for b in self._backends if self._usable(b)]
+            if len(usable) < 2:
+                break
+            src = max(usable, key=self._loaded_count)
+            dst = min(usable, key=self._loaded_count)
+            if self._loaded_count(src) - self._loaded_count(dst) < 2:
+                break
+            # 移し先に入っている（インストール済みの）モデルだけが候補。一番使われていないものから
+            cands = [m for m, on in src.manager._loaded.items()
+                     if on and any(v == m for v in dst.manager._style_to_model.values())
+                     and not dst.manager._loaded.get(m)]
+            if not cands:
+                break
+            model = min(cands, key=lambda m: src.manager._last_used.get(m, 0.0))
+            sid = next(k for k, v in sorted(dst.manager._style_to_model.items()) if v == model)
+            try:
+                await dst.manager.ensure_loaded(sid)
+                await dst.client.synthesis(sid, await dst.client.audio_query("あ", sid))
+            except Exception as exc:
+                logger.warning("再配置: 移し先への読み込みに失敗 %s: %s", dst.url, exc)
+                break
+            async with src.manager._lock:
+                await src.client.unload_model(model)
+                src.manager._loaded[model] = False
+                src.manager._last_used.pop(model, None)
+            moved.append({"model": model, "from": src.url, "to": dst.url})
+        if moved:
+            logger.info("再配置: %d 本を移しました", len(moved))
+        return moved
+
     async def get_speakers(self) -> list[dict]:
         """Proxy /speakers from the first backend."""
         return await self._backends[0].get_speakers()
