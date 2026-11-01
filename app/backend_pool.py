@@ -1081,8 +1081,9 @@ class BackendPool:
                 logger.warning("重複ロードの解消で例外: %s", exc)
 
     async def dedupe_loaded(self) -> list[tuple[str, str]]:
-        """同じモデルが2台以上に載っていたら、定位置（登録順で最初の台）以外から降ろす。
+        """同じモデルが2台以上に載っていたら、1台だけ残して降ろす。
 
+        残すのは、載っている台のうちロード済みモデルが最も少ない台（同数なら登録順）。
         使える台が1台だけのときは何もしない（降ろす先の代わりが無い）。
         """
         if self.is_cloud:
@@ -1091,13 +1092,14 @@ class BackendPool:
         if len(usable) < 2:
             return []
         dropped: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for b in usable:
-            for model, on in list(b.manager._loaded.items()):
-                if not on:
-                    continue
-                if model not in seen:
-                    seen.add(model)
+        models = {m for b in usable for m, on in b.manager._loaded.items() if on}
+        for model in models:
+            holders = [b for b in usable if b.manager._loaded.get(model)]
+            if len(holders) < 2:
+                continue
+            keep = min(holders, key=self._loaded_count)
+            for b in holders:
+                if b is keep:
                     continue
                 async with b.manager._lock:
                     await b.client.unload_model(model)

@@ -607,7 +607,7 @@ Aivis Cloud API には合成前のアクセント句を取得する経路が無�
 )
 async def audio_query_endpoint(text: str, speaker_id: int):
     _reject_if_cloud("アクセント句の取得")
-    backend = pool.next()
+    backend = pool.pick(None, speaker_id)   # モデルの定位置の台へ（別の台に重複ロードしない）
     try:
         await backend.manager.ensure_loaded(speaker_id)
     except Exception:
