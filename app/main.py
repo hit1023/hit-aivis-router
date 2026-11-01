@@ -1529,7 +1529,32 @@ async def set_master(req: MasterRequest) -> dict:
         result = await pool.set_master(req.url)
     except KeyError:
         raise HTTPException(status_code=404, detail="その台は登録されていません")
+    except InvalidBackendURL as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {**await _backends_response(), "master": result["master"], "dict": result["dict"]}
+
+
+class EnabledRequest(BaseModel):
+    url: str
+    enabled: bool = Field(..., description="true で有効化、false で無効化（振り分けから外す・登録は残す）")
+
+
+@app.put(
+    "/backends/enabled",
+    summary="台の有効/無効を切り替え",
+    description="無効にした台は /speak の振り分けとウォームアップの対象外になります（登録は残るので、いつでも有効に戻せます）。マスターと最後の有効な1台は無効化できません。",
+    tags=["バックエンド管理"],
+    dependencies=[Depends(require_admin)],
+)
+async def set_backend_enabled(req: EnabledRequest) -> dict:
+    _reject_if_cloud("台の無効化")
+    try:
+        pool.set_enabled(req.url, req.enabled)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="その台は登録されていません")
+    except InvalidBackendURL as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return await _backends_response()
 
 
 @app.delete(

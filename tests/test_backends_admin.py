@@ -607,3 +607,35 @@ async def test_speak_retries_on_other_backend(tmp_path, monkeypatch):
         r = await ac.post("/speak", json={"text": "こんにちは", "speaker_id": 1})
     assert r.status_code == 200
     assert r.headers["X-Backend"].startswith("http://good")
+
+
+# --- 無効化（登録は残して振り分けから外す） -----------------------------------
+
+A, B = "http://192.168.0.21:10101", "http://192.168.0.22:10101"
+
+
+@pytest.mark.asyncio
+async def test_disable_skips_rotation_and_persists(client):
+    await client.post("/backends", json={"url": B}, headers=H)
+    r = await client.put("/backends/enabled", json={"url": B, "enabled": False}, headers=H)
+    assert r.status_code == 200
+    states = {b["url"]: b["state"] for b in r.json()["backends"]}
+    assert states == {A: "active", B: "disabled"}
+    assert {client.pool.next().url for _ in range(6)} == {A}
+    assert client.pool.pick_other(client.pool._backends[0]) is None
+    assert json.loads(client.store.read_text())["disabled"] == [B]
+    reborn = BackendPool(["http://from-env:10101"], store_path=client.store)
+    assert [b.enabled for b in reborn._backends] == [True, False]
+    r = await client.put("/backends/enabled", json={"url": B, "enabled": True}, headers=H)
+    assert {client.pool.next().url for _ in range(6)} == {A, B}
+    assert "disabled" not in json.loads(client.store.read_text())
+
+
+@pytest.mark.asyncio
+async def test_cannot_disable_master_or_last_enabled(client):
+    await client.post("/backends", json={"url": B}, headers=H)
+    assert (await client.put("/backends/enabled", json={"url": A, "enabled": False}, headers=H)).status_code == 409
+    await client.put("/backends/enabled", json={"url": B, "enabled": False}, headers=H)
+    assert (await client.put("/backends/enabled", json={"url": A, "enabled": False}, headers=H)).status_code == 409
+    assert (await client.put("/backends/enabled", json={"url": "http://192.168.0.77:10101", "enabled": False}, headers=H)).status_code == 404
+    assert (await client.put("/backends/master", json={"url": B}, headers=H)).status_code == 409

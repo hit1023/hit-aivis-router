@@ -154,6 +154,8 @@ class Backend:
     recent_ms: deque = field(default_factory=lambda: deque(maxlen=20))
     # この時刻(monotonic)まで振り分けから外す（不調だった台の一時退避）
     cooldown_until: float = 0.0
+    # False なら振り分けに使わない（登録は残す。設定画面の「無効化」）
+    enabled: bool = True
 
     def in_cooldown(self) -> bool:
         return self.cooldown_until > time.monotonic()
@@ -525,6 +527,9 @@ class BackendPool:
         else:
             self._backends = [Backend(url) for url in (self._load_saved_urls() or urls)]
             self._master_url: Optional[str] = self._load_saved_master()
+            disabled = {u.rstrip("/") for u in self._load_saved_disabled()}
+            for b in self._backends:
+                b.enabled = b.url.rstrip("/") not in disabled
             for b in self._backends:
                 b.manager.idle_timeout = idle_timeout
         self._cycle = itertools.cycle(self._backends)
@@ -557,12 +562,22 @@ class BackendPool:
         except (OSError, ValueError, AttributeError):
             return None
 
+    def _load_saved_disabled(self) -> list[str]:
+        try:
+            d = json.loads(self._store_path.read_text(encoding="utf-8")).get("disabled", [])
+            return [u for u in d if isinstance(u, str) and u]
+        except (OSError, ValueError, AttributeError):
+            return []
+
     def _save_urls(self) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._store_path.with_suffix(".tmp")
         data = {"urls": [b.url for b in self._backends]}
         if getattr(self, "_master_url", None):
             data["master"] = self._master_url
+        disabled = [b.url for b in self._backends if not b.enabled]
+        if disabled:
+            data["disabled"] = disabled
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._store_path)
 
@@ -595,6 +610,8 @@ class BackendPool:
         target = next((b for b in self._backends if b.url.rstrip("/") == key), None)
         if target is None:
             raise KeyError(url)
+        if not target.enabled:
+            raise InvalidBackendURL("無効化中の台はマスターにできません。先に有効化してください")
         self._master_url = target.url
         self._save_urls()
         logger.info("マスター台を変更: %s", target.url)
@@ -659,7 +676,8 @@ class BackendPool:
             pr["loaded_models"] = sum(1 for v in b.manager._loaded.values() if v)
             if pr.get("ok"):
                 b.cooldown_until = 0.0
-            pr["state"] = "active"
+            pr["state"] = "active" if b.enabled else "disabled"
+            pr["enabled"] = b.enabled
             pr["master"] = b is self.master
             pr.update(self._usage(b))
             out.append(pr)
@@ -685,7 +703,8 @@ class BackendPool:
         for i, (b, pr) in enumerate(zip(self._backends, probes), start=1):
             out.append({
                 "index": i,
-                "state": "active",
+                "state": "active" if b.enabled else "disabled",
+                "enabled": b.enabled,
                 "master": b is self.master,
                 "ok": pr["ok"],
                 "latency_ms": pr.get("latency_ms"),
@@ -812,6 +831,25 @@ class BackendPool:
             await new.client.import_user_dict(words, override=True)
         return len(words)
 
+    def set_enabled(self, url: str, enabled: bool) -> None:
+        """台を振り分けに使うか切り替える（登録は残す）。マスターと最後の有効な1台は無効化できない。"""
+        if self.is_cloud:
+            raise NotImplementedError("Aivis Cloud では台の無効化はできません")
+        key = url.rstrip("/")
+        target = next((b for b in self._backends if b.url.rstrip("/") == key), None)
+        if target is None:
+            raise KeyError(url)
+        if not enabled:
+            if target is self.master:
+                raise InvalidBackendURL("マスターの台は無効化できません。先に別の台をマスターにしてください")
+            if sum(1 for b in self._backends if b.enabled and b is not target) < 1:
+                raise InvalidBackendURL("最後の有効な1台は無効化できません")
+        target.enabled = enabled
+        if enabled:
+            target.cooldown_until = 0.0
+        self._save_urls()
+        logger.info("バックエンドを%s: %s", "有効化" if enabled else "無効化", target.url)
+
     async def remove_backend(self, url: str) -> None:
         if self.is_cloud:
             raise NotImplementedError("Aivis Cloud では台の削除はできません")
@@ -842,14 +880,16 @@ class BackendPool:
         first = None
         for _ in range(len(self._backends)):
             b = next(self._cycle)
+            if not getattr(b, "enabled", True):
+                continue
             if not getattr(b, "in_cooldown", lambda: False)():
                 return b
             first = first or b
-        return first
+        return first or self.master
 
     def pick_other(self, failed: AnyBackend) -> Optional[AnyBackend]:
         """失敗した台以外から、やり直し先を1台選ぶ。元気な台を優先し、いなければ None。"""
-        others = [b for b in self._backends if b is not failed]
+        others = [b for b in self._backends if b is not failed and getattr(b, "enabled", True)]
         healthy = [b for b in others if not getattr(b, "in_cooldown", lambda: False)()]
         pool = healthy or []
         return pool[0] if pool else None
@@ -898,7 +938,8 @@ class BackendPool:
         if self.is_cloud:
             return
         for b in list(self._backends):
-            await self._warm_backend(b)
+            if b.enabled:
+                await self._warm_backend(b)
 
     async def keep_warm_loop(self, interval: float = 60.0) -> None:
         """定期的に各台の状態を見て、冷えている（エンジン再起動など）モデルを温め直す。"""
@@ -907,6 +948,8 @@ class BackendPool:
         while True:
             await asyncio.sleep(interval)
             for b in list(self._backends):
+                if not b.enabled:
+                    continue
                 try:
                     await self._warm_backend(b)
                 except Exception as exc:  # ループは止めない
