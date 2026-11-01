@@ -947,15 +947,19 @@ class BackendPool:
         """aivmxファイルを全バックエンドにインストールする。各バックエンドの結果を返す。"""
         if self.is_cloud:
             raise NotImplementedError("Aivis Cloud ではモデルのインストールはできません")
-        results = []
-        for b in [self.master, *self._followers()]:
+        targets = [self.master, *self._followers()]
+
+        async def _one(b):
             try:
                 await b.client.install_model(filename, data)
-                results.append({"backend_url": b.url, "success": True})
                 logger.info("Model installed on %s", b.url)
+                return {"backend_url": b.url, "success": True}
             except Exception as exc:
-                results.append({"backend_url": b.url, "success": False, "error": str(exc)})
                 logger.error("Model install failed on %s: %s", b.url, exc)
+                return {"backend_url": b.url, "success": False, "error": str(exc)}
+
+        # 全台へ並列に送る（順次だと台数×転送時間かかる）
+        results = list(await asyncio.gather(*(_one(b) for b in targets)))
         await asyncio.gather(*(b.manager.refresh() for b in self._backends), return_exceptions=True)
         return results
 

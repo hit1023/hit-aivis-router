@@ -11,7 +11,7 @@ import hmac
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -399,13 +399,18 @@ async def list_models():
         raise HTTPException(status_code=502, detail="モデル情報の取得に失敗しました")
 
 
+_install_job: dict = {}
+_install_tasks: set = set()
+
+
 @app.post(
     "/models/install",
     summary="カスタムモデルをファイルからインストール",
     description="""
 `.aivmx` 形式のモデルファイルをアップロードして全バックエンドサーバーにインストールします。
 
-- 複数バックエンドが設定されている場合は全台に順次インストールします
+- 複数バックエンドが設定されている場合は全台へ並列にインストールします
+- 応答は即座に `202` で返り、インストールは裏で進みます。結果は `GET /models/install/status` で確認します
 - インストール完了後、スピーカーマッピングを自動で更新します
 - ファイルサイズによっては完了まで数分かかる場合があります
 """,
@@ -416,16 +421,47 @@ async def install_model(file: UploadFile = File(...)):
     filename = file.filename or "model.aivmx"
     if not filename.split("?")[0].endswith(".aivmx"):
         raise HTTPException(status_code=400, detail="ファイルは .aivmx 形式を指定してください")
+    if _install_job.get("state") == "running":
+        raise HTTPException(status_code=409, detail="別のインストールが実行中です。完了までお待ちください")
     data = await file.read()
-    results = await pool.install_model(filename, data)
-    failed = [r for r in results if not r["success"]]
-    if len(failed) == len(results):
-        raise HTTPException(status_code=502, detail="全バックエンドでインストールに失敗しました")
-    return {
-        "filename": filename,
-        "results": results,
-        "message": f"{len(results) - len(failed)}/{len(results)} バックエンドにインストールしました",
-    }
+    _install_job.clear()
+    _install_job.update({"state": "running", "filename": filename, "results": [], "message": "インストール中..."})
+    task = asyncio.create_task(_run_install(filename, data))
+    _install_tasks.add(task)
+    task.add_done_callback(_install_tasks.discard)
+    return JSONResponse(
+        status_code=202,
+        content={"filename": filename, "state": "running", "message": "受け付けました。インストールは裏で進みます"},
+    )
+
+
+async def _run_install(filename: str, data: bytes) -> None:
+    """アップロード応答を待たせないよう、インストールはバックグラウンドで行う。"""
+    try:
+        results = await pool.install_model(filename, data)
+        failed = [r for r in results if not r["success"]]
+        ok = len(results) - len(failed)
+        _install_job.update({
+            "state": "failed" if ok == 0 else "done",
+            "results": results,
+            "message": (
+                "全バックエンドでインストールに失敗しました" if ok == 0
+                else f"{ok}/{len(results)} バックエンドにインストールしました"
+            ),
+        })
+    except Exception as exc:
+        logger.error("install job crashed: %s", exc)
+        _install_job.update({"state": "failed", "message": f"インストールに失敗しました: {exc}"})
+
+
+@app.get(
+    "/models/install/status",
+    summary="モデルインストールの進行状況",
+    description="直近の `/models/install` の状態（running / done / failed）を返します。",
+    tags=["モデル管理"],
+)
+async def install_model_status():
+    return dict(_install_job) or {"state": "idle"}
 
 
 @app.post(

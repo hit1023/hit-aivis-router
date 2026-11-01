@@ -1,3 +1,4 @@
+import asyncio
 """
 バックエンド管理 API（/backends）のテスト。
 
@@ -512,3 +513,18 @@ def test_kana_verify_cache_skips_llm(tmp_path, monkeypatch):
     r2 = asyncio.run(kana_checker.verify_readings(pairs, provider="claude_cli", cache_file=cf))
     assert len(calls) == 1 and calls[0] == ["試験"]
     assert r1 == r2 and r1[0]["correct"] is True
+
+
+@pytest.mark.asyncio
+async def test_install_returns_202_and_reports_status(client, monkeypatch):
+    async def fake_install(self, filename, data):
+        pass
+    monkeypatch.setattr(AivisClient, "install_model", fake_install)
+    r = await client.post("/models/install", files={"file": ("a.aivmx", b"x")})
+    assert r.status_code == 202 and r.json()["state"] == "running"
+    for _ in range(50):
+        st = (await client.get("/models/install/status")).json()
+        if st["state"] != "running":
+            break
+        await asyncio.sleep(0.05)
+    assert st["state"] == "done" and st["results"][0]["success"] is True
