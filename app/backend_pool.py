@@ -928,35 +928,54 @@ class BackendPool:
         model = getattr(mgr, "_style_to_model", {}).get(speaker_id)
         return bool(model and getattr(mgr, "_loaded", {}).get(model))
 
-    def pick(self, session: Optional[str], speaker_id: Optional[int] = None) -> AnyBackend:
-        """使う台を選ぶ。優先順は ①このセッションが前に成功した台 ②この話者のモデルが
-        ロード済みの台（順番に）③通常の順番。
+    @staticmethod
+    def _model_of(b: AnyBackend, speaker_id: Optional[int]) -> Optional[str]:
+        mgr = getattr(b, "manager", None)
+        return getattr(mgr, "_style_to_model", {}).get(speaker_id) if speaker_id is not None else None
 
-        ①の台が使えない = 削除された・無効化された・不調で退避中・無通信で期限切れ。
+    @staticmethod
+    def _loaded_count(b: AnyBackend) -> int:
+        return sum(1 for v in getattr(getattr(b, "manager", None), "_loaded", {}).values() if v)
+
+    def _usable(self, b: AnyBackend) -> bool:
+        return (b in self._backends and getattr(b, "enabled", True)
+                and not getattr(b, "in_cooldown", lambda: False)())
+
+    def home_for(self, speaker_id: Optional[int]) -> Optional[AnyBackend]:
+        """このモデルの「定位置」の台。同じモデルを複数の台に載せないための判断。
+
+        ①すでにロード済みの台（複数あれば最初の台）②どこにも無ければ、ロード済みモデルが
+        最も少ない台（同数なら登録順）。使える台がなければ None。
         """
+        if speaker_id is None:
+            return None
+        usable = [b for b in self._backends if self._usable(b)]
+        if len(usable) < 1:
+            return None
+        for b in usable:
+            if self._has_loaded(b, speaker_id):
+                return b
+        return min(usable, key=self._loaded_count)
+
+    def pick(self, session: Optional[str], speaker_id: Optional[int] = None) -> AnyBackend:
+        """使う台を選ぶ。1つのモデルを2台以上に載せない（RAMの無駄を避ける）ことを最優先にする。
+
+        ①話者のモデルの定位置の台（ロード済みの台、無ければ最も空いている台）
+        ②話者が分からない場合のみ、このセッションが前に成功した台 ③通常の順番。
+        定位置の台が使えない（無効・不調で退避中）ときは、他の台が代わりに受ける。
+        """
+        if speaker_id is not None and len(self._backends) > 1:
+            home = self.home_for(speaker_id)
+            if home is not None:
+                return home
         ttl = settings.session_sticky_ttl
         if session and ttl > 0:
             entry = self._sticky.get(session)
             if entry:
                 b, last = entry
-                usable = (
-                    b in self._backends
-                    and getattr(b, "enabled", True)
-                    and not getattr(b, "in_cooldown", lambda: False)()
-                    and time.monotonic() - last <= ttl
-                )
-                if usable:
+                if self._usable(b) and time.monotonic() - last <= ttl:
                     return b
                 self._sticky.pop(session, None)
-        if speaker_id is not None and len(self._backends) > 1:
-            warm = [b for b in self._backends
-                    if getattr(b, "enabled", True)
-                    and not getattr(b, "in_cooldown", lambda: False)()
-                    and self._has_loaded(b, speaker_id)]
-            if warm:
-                # ロード済みの台どうしで順番に回す（1台に偏らない）
-                self._warm_rr = getattr(self, "_warm_rr", -1) + 1
-                return warm[self._warm_rr % len(warm)]
         return self.next()
 
     def remember(self, session: Optional[str], backend: AnyBackend) -> None:
@@ -1005,6 +1024,10 @@ class BackendPool:
             skip = getattr(self, "_manual_unloaded", set())
             for model, sid in first_style.items():
                 if b.manager._loaded.get(model) or model in skip:
+                    continue
+                # 同じモデルを複数の台に載せない: 他の台に載っている / 定位置が別の台なら温めない
+                home = self.home_for(sid)
+                if home is not None and home is not b:
                     continue
                 started = time.monotonic()
                 try:

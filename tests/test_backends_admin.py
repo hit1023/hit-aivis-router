@@ -456,8 +456,8 @@ async def test_warmup_warms_only_cold_models_sequentially(client):
     await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
     calls = _stub_engines(client, {"cold": (7, False), "warm": (9, True)})
     await client.pool.warmup()
-    assert calls == [("load", "http://192.168.0.21:10101", 7), ("syn", "http://192.168.0.21:10101", 7),
-                     ("load", "http://192.168.0.22:10101", 7), ("syn", "http://192.168.0.22:10101", 7)]
+    # 同じモデルは1台にしか載せない（2台目には載せない）
+    assert calls == [("load", "http://192.168.0.21:10101", 7), ("syn", "http://192.168.0.21:10101", 7)]
 
 
 @pytest.mark.asyncio
@@ -729,3 +729,38 @@ def test_prefers_backend_with_model_loaded(tmp_path, monkeypatch):
     # 未知の話者は通常の順番
     b.cooldown_until = 0.0
     assert pool.pick("u10", 999) in (a, b)
+
+
+def test_model_has_single_home_and_ignores_session(tmp_path, monkeypatch):
+    """同じモデルを複数の台に載せない: セッションが別の台に固定されていても、ロード済みの台へ。"""
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "session_sticky_ttl", 600)
+    a, b = pool._backends[0], pool._backends[1]
+    for x in (a, b):
+        x.manager._style_to_model = {7: "m1", 8: "m2"}
+    a.manager._loaded = {"m1": False, "m2": False}
+    b.manager._loaded = {"m1": True, "m2": False}
+    pool.remember("s", a)                                # セッションは a に固定されているが
+    assert pool.pick("s", 7) is b                        # m1 は b に載っているので b
+
+
+def test_unloaded_model_goes_to_emptiest_backend(tmp_path, monkeypatch):
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    a, b = pool._backends[0], pool._backends[1]
+    for x in (a, b):
+        x.manager._style_to_model = {7: "m1", 8: "m2"}
+    a.manager._loaded = {"m1": True, "m2": False}
+    b.manager._loaded = {"m1": False, "m2": False}
+    assert pool.pick("u", 8) is b                        # m2 はどこにも無い → 空いている b
+
+
+def test_home_falls_back_when_loaded_backend_is_down(tmp_path, monkeypatch):
+    import time as _t
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    a, b = pool._backends[0], pool._backends[1]
+    for x in (a, b):
+        x.manager._style_to_model = {7: "m1"}
+    a.manager._loaded = {"m1": True}
+    b.manager._loaded = {"m1": False}
+    a.cooldown_until = _t.monotonic() + 60
+    assert pool.pick("u", 7) is b                        # 定位置が不調なら代わりの台
