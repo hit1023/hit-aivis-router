@@ -714,7 +714,7 @@ class BackendPool:
             })
         return out + self._pending_view(False, len(out) + 1)
 
-    async def add_backend(self, url: str) -> dict:
+    async def add_backend(self, url: str, position: Optional[int] = None) -> dict:
         """台を追加する。
 
         - 話者が揃っている台は、辞書をコピーしてすぐ振り分けに加える（state=active）。
@@ -742,7 +742,7 @@ class BackendPool:
             await backend.close()
             raise BackendUnreachable(str(exc)) from exc
         if not missing:
-            self._activate(backend)
+            self._activate(backend, position)
             logger.info("バックエンドを追加: %s（計 %d 台、辞書 %d 語をコピー）", url, len(self._backends), synced)
             return {"url": url, "state": "active", "synced_words": synced}
 
@@ -762,14 +762,17 @@ class BackendPool:
         self._pending[norm] = {
             "backend": backend, "state": "syncing", "done": 0, "total": len(missing),
             "current": names[0], "error": None,
-            "words_state": "waiting", "words_total": None,
+            "words_state": "waiting", "words_total": None, "position": position,
             "task": asyncio.create_task(self._sync_job(norm, backend, missing)),
         }
         logger.info("バックエンドの同期を開始: %s（モデル %d 件）", url, len(missing))
         return {"url": url, "state": "syncing", "missing_models": len(missing)}
 
-    def _activate(self, backend: "Backend") -> None:
-        self._backends = [*self._backends, backend]
+    def _activate(self, backend: "Backend", position: Optional[int] = None) -> None:
+        if position is None or position >= len(self._backends):
+            self._backends = [*self._backends, backend]
+        else:
+            self._backends = [*self._backends[:position], backend, *self._backends[position:]]
         self._rebuild_cycle()
         self._save_urls()
         # 追加直後の最初のリクエストが冷えた台に当たらないよう、裏で温める
@@ -814,7 +817,7 @@ class BackendPool:
             entry["error"] = f"{type(exc).__name__}: {exc}"[:300]
             return
         self._pending.pop(key, None)
-        self._activate(backend)
+        self._activate(backend, entry.get("position"))
         logger.info("同期が完了し振り分けに追加: %s（計 %d 台、辞書 %d 語）", backend.url, len(self._backends), synced)
 
     def _ensure_same_speakers(self, new: "Backend") -> None:
@@ -839,16 +842,43 @@ class BackendPool:
         target = next((b for b in self._backends if b.url.rstrip("/") == key), None)
         if target is None:
             raise KeyError(url)
+        if enabled:
+            raise ValueError("有効化は enable_backend() を使う（モデル・辞書の同期が要る）")
         if not enabled:
             if target is self.master:
                 raise InvalidBackendURL("マスターの台は無効化できません。先に別の台をマスターにしてください")
             if sum(1 for b in self._backends if b.enabled and b is not target) < 1:
                 raise InvalidBackendURL("最後の有効な1台は無効化できません")
-        target.enabled = enabled
-        if enabled:
-            target.cooldown_until = 0.0
+        target.enabled = False
         self._save_urls()
-        logger.info("バックエンドを%s: %s", "有効化" if enabled else "無効化", target.url)
+        logger.info("バックエンドを無効化: %s", target.url)
+
+    async def enable_backend(self, url: str) -> dict:
+        """無効化中の台を振り分けに戻す。無効の間に入ったモデル・辞書の変更を、戻す前に同期する。
+
+        台の追加と同じ手順（接続確認 → 不足モデルの送り込み → 辞書コピー）を通し、
+        完了してから元の位置に戻す。接続できない・モデルが足りず同期もできない場合は、
+        無効のまま残してエラーにする。
+        """
+        if self.is_cloud:
+            raise NotImplementedError("Aivis Cloud では台の有効化はできません")
+        key = url.rstrip("/")
+        target = next((b for b in self._backends if b.url.rstrip("/") == key), None)
+        if target is None:
+            raise KeyError(url)
+        if target.enabled:
+            return {"url": target.url, "state": "active", "synced_words": 0}
+        idx = self._backends.index(target)
+        self._backends = [b for b in self._backends if b is not target]
+        self._rebuild_cycle()
+        try:
+            result = await self.add_backend(target.url, position=idx)
+        except BaseException:
+            self._backends = [*self._backends[:idx], target, *self._backends[idx:]]
+            self._rebuild_cycle()
+            raise
+        await target.close()
+        return result
 
     async def remove_backend(self, url: str) -> None:
         if self.is_cloud:

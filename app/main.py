@@ -1542,19 +1542,25 @@ class EnabledRequest(BaseModel):
 @app.put(
     "/backends/enabled",
     summary="台の有効/無効を切り替え",
-    description="無効にした台は /speak の振り分けとウォームアップの対象外になります（登録は残るので、いつでも有効に戻せます）。マスターと最後の有効な1台は無効化できません。",
+    description="無効にした台は /speak の振り分けとウォームアップの対象外になります（登録は残ります）。有効に戻すときは、無効の間に変わったモデル・辞書を同期してから戻します（台の追加と同じ手順で、モデルが多いと state=syncing になり完了後に自動で戻ります）。マスターと最後の有効な1台は無効化できません。",
     tags=["バックエンド管理"],
     dependencies=[Depends(require_admin)],
 )
 async def set_backend_enabled(req: EnabledRequest) -> dict:
     _reject_if_cloud("台の無効化")
+    added = None
     try:
-        pool.set_enabled(req.url, req.enabled)
+        if req.enabled:
+            added = await pool.enable_backend(req.url)
+        else:
+            pool.set_enabled(req.url, False)
     except KeyError:
         raise HTTPException(status_code=404, detail="その台は登録されていません")
     except InvalidBackendURL as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    return await _backends_response()
+    except BackendUnreachable as exc:
+        raise HTTPException(status_code=502, detail=f"台に接続できませんでした（無効のままです）: {exc}")
+    return {**await _backends_response(), "added": added}
 
 
 @app.delete(

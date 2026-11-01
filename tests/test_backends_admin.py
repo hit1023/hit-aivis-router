@@ -627,6 +627,8 @@ async def test_disable_skips_rotation_and_persists(client):
     reborn = BackendPool(["http://from-env:10101"], store_path=client.store)
     assert [b.enabled for b in reborn._backends] == [True, False]
     r = await client.put("/backends/enabled", json={"url": B, "enabled": True}, headers=H)
+    assert r.status_code == 200 and r.json()["added"]["state"] == "active"
+    assert any(b == B for b, _, _ in IMPORTED)              # 戻すときに辞書も同期される
     assert {client.pool.next().url for _ in range(6)} == {A, B}
     assert "disabled" not in json.loads(client.store.read_text())
 
@@ -639,3 +641,35 @@ async def test_cannot_disable_master_or_last_enabled(client):
     assert (await client.put("/backends/enabled", json={"url": A, "enabled": False}, headers=H)).status_code == 409
     assert (await client.put("/backends/enabled", json={"url": "http://192.168.0.77:10101", "enabled": False}, headers=H)).status_code == 404
     assert (await client.put("/backends/master", json={"url": B}, headers=H)).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_enable_syncs_missing_models_and_keeps_position(client, source_dir):
+    C = "http://192.168.0.23:10101"
+    await client.post("/backends", json={"url": B}, headers=H)
+    await client.post("/backends", json={"url": C}, headers=H)
+    await client.put("/backends/enabled", json={"url": B, "enabled": False}, headers=H)
+    MODELS_BY_URL[B] = {"m1": {}}                           # 無効の間にモデルが足りない状態になった
+    INSTALL_DELAY[0] = 0.1
+    r = await client.put("/backends/enabled", json={"url": B, "enabled": True}, headers=H)
+    assert r.status_code == 200 and r.json()["added"]["state"] == "syncing"
+    assert B not in {b.url for b in client.pool._backends}   # 同期が終わるまで振り分けに入らない
+    await _wait_synced(client.pool)
+    assert INSTALLED[-1] == (B, str(source_dir / "m2.aivmx"))
+    assert [b.url for b in client.pool._backends] == [A, B, C]   # 元の位置に戻る
+    assert all(b.enabled for b in client.pool._backends)
+
+
+@pytest.mark.asyncio
+async def test_enable_unreachable_stays_disabled(client, monkeypatch):
+    D = "http://192.168.0.24:10101"
+    await client.post("/backends", json={"url": D}, headers=H)
+    await client.put("/backends/enabled", json={"url": D, "enabled": False}, headers=H)
+
+    async def down(url, timeout=5.0):
+        return {"url": url, "ok": False, "error": "ConnectError: refused"}
+    monkeypatch.setattr(BackendPool, "probe", staticmethod(down))
+    r = await client.put("/backends/enabled", json={"url": D, "enabled": True}, headers=H)
+    assert r.status_code == 502
+    assert [b.enabled for b in client.pool._backends] == [True, False]
+    assert len(client.pool._backends) == 2
