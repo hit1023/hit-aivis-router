@@ -1075,6 +1075,38 @@ class BackendPool:
                 *(b.manager.unload_idle() for b in self._backends),
                 return_exceptions=True,
             )
+            try:
+                await self.dedupe_loaded()
+            except Exception as exc:  # ループは止めない
+                logger.warning("重複ロードの解消で例外: %s", exc)
+
+    async def dedupe_loaded(self) -> list[tuple[str, str]]:
+        """同じモデルが2台以上に載っていたら、定位置（登録順で最初の台）以外から降ろす。
+
+        使える台が1台だけのときは何もしない（降ろす先の代わりが無い）。
+        """
+        if self.is_cloud:
+            return []
+        usable = [b for b in self._backends if self._usable(b)]
+        if len(usable) < 2:
+            return []
+        dropped: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for b in usable:
+            for model, on in list(b.manager._loaded.items()):
+                if not on:
+                    continue
+                if model not in seen:
+                    seen.add(model)
+                    continue
+                async with b.manager._lock:
+                    await b.client.unload_model(model)
+                    b.manager._loaded[model] = False
+                    b.manager._last_used.pop(model, None)
+                dropped.append((b.url, model))
+        if dropped:
+            logger.info("重複ロードを解消: %d 本を降ろしました", len(dropped))
+        return dropped
 
     async def get_speakers(self) -> list[dict]:
         """Proxy /speakers from the first backend."""

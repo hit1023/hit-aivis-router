@@ -764,3 +764,21 @@ def test_home_falls_back_when_loaded_backend_is_down(tmp_path, monkeypatch):
     b.manager._loaded = {"m1": False}
     a.cooldown_until = _t.monotonic() + 60
     assert pool.pick("u", 7) is b                        # 定位置が不調なら代わりの台
+
+
+@pytest.mark.asyncio
+async def test_dedupe_unloads_duplicates_keeps_first(client):
+    await client.post("/backends", headers=H, json={"url": "http://192.168.0.22:10101"})
+    calls = _stub_engines(client, {"m": (7, True)})
+    unloaded = []
+
+    async def fake_unload(self, uuid):
+        unloaded.append((self._base if hasattr(self, "_base") else id(self), uuid))
+    from app.aivis_client import AivisClient
+    import pytest as _p
+    _p.MonkeyPatch().setattr(AivisClient, "unload_model", fake_unload)
+    dropped = await client.pool.dedupe_loaded()
+    assert [m for _, m in dropped] == ["m"]
+    assert dropped[0][0] == "http://192.168.0.22:10101"      # 2台目から降ろす
+    assert client.pool._backends[0].manager._loaded["m"] is True
+    assert client.pool._backends[1].manager._loaded["m"] is False
