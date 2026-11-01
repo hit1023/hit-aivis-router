@@ -1,6 +1,18 @@
 services:
+  # 進捗イベント配信用の Zenoh ルーター（pub/sub）。ルーターが client として接続する
+  zenoh:
+    image: eclipse/zenoh:1.10.2
+    restart: unless-stopped
+    command: ["--no-multicast-scouting"]
+    expose:
+      - "7447"
+
   aivis-router:
     build: .
+    environment:
+      ZENOH_ENDPOINT: ${ZENOH_ENDPOINT:-tcp/zenoh:7447}
+    depends_on:
+      - zenoh
     ports:
       - "8000:8000"
     env_file:

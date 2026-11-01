@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # 既存の台のモデルフォルダを読み取り専用でマウントして指定する。空なら自動同期はしない。
     models_source_dir: str = ""
 
+    # 進捗イベント配信用 Zenoh ルーターのエンドポイント（例: tcp/zenoh:7447）。空なら進程内配信のみ。
+    zenoh_endpoint: str = ""
+
     # 管理系 API（/backends）を使うためのトークン。空なら管理系 API は無効（403）。
     admin_token: str = ""
 

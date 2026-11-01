@@ -547,3 +547,26 @@ AIVIS Router (FastAPI)
 ### Claude Code ヘッドレス方式（クレジット節約設計）
 
 方式に `claude_cli` を選ぶと、コンテナ内の `claude -p` で判定します（イメージに Claude Code を同梱）。トークン欄には `claude setup-token` の OAuth トークンを入れます（従量課金のAPIキーではなくサブスク枠を消費）。節約策: haiku・ツール/MCP/スキル/設定読込をすべて無効化・最小システムプロンプト・単語ごとの結果を `/data/kana_llm_cache.json` にキャッシュ（同じ単語は再問い合わせしない）・複数単語を1回の呼び出しに集約。
+
+
+## モデルインストールの進捗配信（Zenoh + SSE）
+
+`POST /models/install` は即座に `202` を返し、インストールは裏で全台へ並列に進みます。
+進捗は Zenoh の pub/sub で流れ、`GET /events/install`（SSE）でブラウザへ中継されます。
+
+- key expression: `aivis/install/<job>/start` / `node`（台ごとの started・done・failed）/ `finish`
+- `docker-compose.yml` の `zenoh` サービス（eclipse/zenoh）に、ルーターが client として接続します（`ZENOH_ENDPOINT`、既定 `tcp/zenoh:7447`）
+- `ZENOH_ENDPOINT` を空にするか Zenoh に繋がらないときは、進程内の配信にフォールバックします（機能は落ちません）
+- 状態の確認だけなら `GET /models/install/status`
+
+別のクライアントで購読して試すには（pub/sub の学習用）:
+
+```bash
+pip install eclipse-zenoh
+python3 -c "
+import zenoh, time
+s = zenoh.open(zenoh.Config.from_json5('{\"mode\":\"client\",\"connect\":{\"endpoints\":[\"tcp/<h-2のIP>:7447\"]}}'))
+s.declare_subscriber('aivis/install/**', lambda x: print(x.key_expr, x.payload.to_string()))
+time.sleep(600)"
+```
+（ホストから繋ぐ場合は compose の zenoh に `ports: ["7447:7447"]` を足してください）

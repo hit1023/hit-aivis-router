@@ -11,7 +11,7 @@ import hmac
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +27,7 @@ from .backend_pool import (
     SpeakerNotFound,
     SynthesisFailed,
 )
+from .events import bus
 from .config import settings
 from .speaker_preset import SpeakerPresetManager
 from .text_replacer import TextReplacer
@@ -121,6 +122,7 @@ async def lifespan(app: FastAPI):
         await pool.initialize()
     except Exception as exc:
         logger.warning("Backend initialization failed (will retry on first request): %s", exc)
+    await bus.start(settings.zenoh_endpoint)
     cleanup_task = asyncio.create_task(pool.start_cleanup_loop())
     async def _warm():
         await pool.warmup()
@@ -134,6 +136,7 @@ async def lifespan(app: FastAPI):
     cleanup_task.cancel()
     if warmup_task:
         warmup_task.cancel()
+    await bus.close()
     await pool.close()
 
 
@@ -424,21 +427,26 @@ async def install_model(file: UploadFile = File(...)):
     if _install_job.get("state") == "running":
         raise HTTPException(status_code=409, detail="別のインストールが実行中です。完了までお待ちください")
     data = await file.read()
+    job_id = uuid.uuid4().hex[:8]
     _install_job.clear()
-    _install_job.update({"state": "running", "filename": filename, "results": [], "message": "インストール中..."})
-    task = asyncio.create_task(_run_install(filename, data))
+    _install_job.update({"job_id": job_id, "state": "running", "filename": filename, "results": [], "message": "インストール中..."})
+    bus.publish(f"aivis/install/{job_id}/start", {"type": "start", "job_id": job_id, "filename": filename})
+    task = asyncio.create_task(_run_install(job_id, filename, data))
     _install_tasks.add(task)
     task.add_done_callback(_install_tasks.discard)
     return JSONResponse(
         status_code=202,
-        content={"filename": filename, "state": "running", "message": "受け付けました。インストールは裏で進みます"},
+        content={"job_id": job_id, "filename": filename, "state": "running", "message": "受け付けました。インストールは裏で進みます"},
     )
 
 
-async def _run_install(filename: str, data: bytes) -> None:
+async def _run_install(job_id: str, filename: str, data: bytes) -> None:
     """アップロード応答を待たせないよう、インストールはバックグラウンドで行う。"""
+    def on_event(ev: dict) -> None:
+        bus.publish(f"aivis/install/{job_id}/node", {"type": "node", "job_id": job_id, **ev})
+
     try:
-        results = await pool.install_model(filename, data)
+        results = await pool.install_model(filename, data, on_event=on_event)
         failed = [r for r in results if not r["success"]]
         ok = len(results) - len(failed)
         _install_job.update({
@@ -452,6 +460,10 @@ async def _run_install(filename: str, data: bytes) -> None:
     except Exception as exc:
         logger.error("install job crashed: %s", exc)
         _install_job.update({"state": "failed", "message": f"インストールに失敗しました: {exc}"})
+    bus.publish(f"aivis/install/{job_id}/finish", {
+        "type": "finish", "job_id": job_id,
+        "state": _install_job.get("state"), "message": _install_job.get("message"),
+    })
 
 
 @app.get(
@@ -462,6 +474,42 @@ async def _run_install(filename: str, data: bytes) -> None:
 )
 async def install_model_status():
     return dict(_install_job) or {"state": "idle"}
+
+
+@app.get(
+    "/events/install",
+    summary="モデルインストールの進捗（SSE）",
+    description="""
+Server-Sent Events でインストールの進捗を流します。イベントは Zenoh の pub/sub
+(`aivis/install/**`) を購読して中継したものです。
+
+- 接続直後に、現在の状態（`snapshot`）を1回送ります
+- `start` / `node`（台ごとの started・done・failed）/ `finish` が順に届きます
+- 15秒ごとにコメント行（`: ping`）を送り、プロキシに切られないようにします
+""",
+    tags=["モデル管理"],
+)
+async def install_events():
+    async def stream():
+        q = bus.subscribe()
+        try:
+            snap = dict(_install_job) or {"state": "idle"}
+            yield f"event: snapshot\ndata: {json.dumps(snap, ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                yield f"event: {ev.get('type', 'message')}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        finally:
+            bus.unsubscribe(q)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post(

@@ -528,3 +528,27 @@ async def test_install_returns_202_and_reports_status(client, monkeypatch):
             break
         await asyncio.sleep(0.05)
     assert st["state"] == "done" and st["results"][0]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_install_publishes_progress_events(client, monkeypatch):
+    from app.events import bus
+    async def fake_install(self, filename, data):
+        pass
+    monkeypatch.setattr(AivisClient, "install_model", fake_install)
+    q = bus.subscribe()
+    try:
+        r = await client.post("/models/install", files={"file": ("a.aivmx", b"x")})
+        job = r.json()["job_id"]
+        got = []
+        while True:
+            ev = await asyncio.wait_for(q.get(), timeout=3)
+            got.append((ev["type"], ev.get("status")))
+            assert ev["job_id"] == job and ev["key"].startswith(f"aivis/install/{job}/")
+            if ev["type"] == "finish":
+                break
+    finally:
+        bus.unsubscribe(q)
+    assert got[0] == ("start", None)
+    assert ("node", "started") in got and ("node", "done") in got
+    assert got[-1] == ("finish", None)
