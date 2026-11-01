@@ -673,3 +673,59 @@ async def test_enable_unreachable_stays_disabled(client, monkeypatch):
     assert r.status_code == 502
     assert [b.enabled for b in client.pool._backends] == [True, False]
     assert len(client.pool._backends) == 2
+
+
+# --- セッションは成功した台を使い続ける -------------------------------------
+
+def test_session_sticks_to_successful_backend(tmp_path, monkeypatch):
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "session_sticky_ttl", 600)
+    first = pool.pick("s1")
+    pool.remember("s1", first)
+    assert {id(pool.pick("s1")) for _ in range(6)} == {id(first)}
+    # 別セッションは通常どおり順番に割り振られる
+    assert {id(pool.pick(f"x{i}")) for i in range(4)} == {id(b) for b in pool._backends}
+
+
+def test_sticky_released_on_cooldown_disable_and_expiry(tmp_path, monkeypatch):
+    import time as _t
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "session_sticky_ttl", 600)
+    a, b = pool._backends[0], pool._backends[1]
+    pool.remember("s", a)
+    a.cooldown_until = _t.monotonic() + 60            # 不調 → 外れる
+    assert pool.pick("s") is b
+    a.cooldown_until = 0.0
+    pool.remember("s", a)
+    a.enabled = False                                  # 無効化 → 外れる
+    assert pool.pick("s") is b
+    a.enabled = True
+    pool.remember("s", a)
+    pool._sticky["s"] = (a, _t.monotonic() - 601)      # 無通信で期限切れ
+    pool.pick("s")
+    assert "s" not in pool._sticky
+
+
+def test_sticky_off_when_ttl_zero(tmp_path, monkeypatch):
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "session_sticky_ttl", 0)
+    pool.remember("s", pool._backends[0])
+    assert pool._sticky == {}
+
+
+def test_prefers_backend_with_model_loaded(tmp_path, monkeypatch):
+    pool = _two_backend_pool(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "session_sticky_ttl", 600)
+    a, b = pool._backends[0], pool._backends[1]
+    for x in (a, b):
+        x.manager._style_to_model = {7: "m1"}
+    a.manager._loaded = {"m1": False}
+    b.manager._loaded = {"m1": True}                     # b だけロード済み
+    assert {id(pool.pick(f"u{i}", 7)) for i in range(6)} == {id(b)}
+    # ロード済みの台が不調なら、通常の順番に戻る（止まらない）
+    import time as _t
+    b.cooldown_until = _t.monotonic() + 60
+    assert pool.pick("u9", 7) is a
+    # 未知の話者は通常の順番
+    b.cooldown_until = 0.0
+    assert pool.pick("u10", 999) in (a, b)

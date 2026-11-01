@@ -9,7 +9,7 @@ from typing import Optional
 
 import hmac
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -60,6 +60,12 @@ AivisSpeech Engine のシンプルなラッパー API です。
 2. `/speak` にテキストとスタイルIDを渡すとMP3が返ってくる
 3. `/models` でVRAMのロード状況を確認できる
 """
+
+
+def _client_key(request: Request) -> str:
+    """セッションの代わりに使う接続元。NPM 経由なら X-Forwarded-For の先頭。"""
+    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "")
 
 
 def _reject_if_cloud(action: str) -> None:
@@ -272,8 +278,11 @@ class ModelStatus(BaseModel):
 """,
     tags=["音声合成"],
 )
-async def speak(req: SpeakRequest):
-    backend = pool.next()
+async def speak(req: SpeakRequest, request: Request, x_session_id: Optional[str] = Header(default=None)):
+    # 同じセッションは、前に成功した台を使い続ける（台が変わると初回だけ遅くなるため）。
+    # セッションは X-Session-Id、無ければ接続元 IP（NPM 経由なら X-Forwarded-For の先頭）。
+    session = (x_session_id or "").strip()[:128] or _client_key(request)
+    backend = pool.pick(session, req.speaker_id)
     served_by = getattr(backend, "url", "Aivis Cloud")   # どの台が応答したか
 
     processed_text = replacer.apply(req.text)
@@ -327,7 +336,9 @@ async def speak(req: SpeakRequest):
                 raise
             logger.warning("%s で失敗したため %s で再試行します: %s", served_by, alt.url, first_exc)
             served_by = alt.url
+            backend = alt
             mp3_bytes = await alt.synthesize_mp3(processed_text, req.speaker_id, synth_params)
+        pool.remember(session, backend)
     except SpeakerNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ModelLoadFailed as exc:

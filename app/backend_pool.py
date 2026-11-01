@@ -536,6 +536,8 @@ class BackendPool:
         self._idle_timeout = idle_timeout
         # モデル同期中（まだ振り分けに入れていない）の台。url -> 状態
         self._pending: dict[str, dict] = {}
+        # セッション → (台, 最後に使った時刻 monotonic)。成功した台を使い続けるため
+        self._sticky: dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     # 台の管理（設定画面から）
@@ -916,6 +918,56 @@ class BackendPool:
                 return b
             first = first or b
         return first or self.master
+
+    @staticmethod
+    def _has_loaded(b: AnyBackend, speaker_id: Optional[int]) -> bool:
+        """その台で、この話者のモデルが今メモリ（RAM）に載っているか。"""
+        if speaker_id is None:
+            return False
+        mgr = getattr(b, "manager", None)
+        model = getattr(mgr, "_style_to_model", {}).get(speaker_id)
+        return bool(model and getattr(mgr, "_loaded", {}).get(model))
+
+    def pick(self, session: Optional[str], speaker_id: Optional[int] = None) -> AnyBackend:
+        """使う台を選ぶ。優先順は ①このセッションが前に成功した台 ②この話者のモデルが
+        ロード済みの台（順番に）③通常の順番。
+
+        ①の台が使えない = 削除された・無効化された・不調で退避中・無通信で期限切れ。
+        """
+        ttl = settings.session_sticky_ttl
+        if session and ttl > 0:
+            entry = self._sticky.get(session)
+            if entry:
+                b, last = entry
+                usable = (
+                    b in self._backends
+                    and getattr(b, "enabled", True)
+                    and not getattr(b, "in_cooldown", lambda: False)()
+                    and time.monotonic() - last <= ttl
+                )
+                if usable:
+                    return b
+                self._sticky.pop(session, None)
+        if speaker_id is not None and len(self._backends) > 1:
+            warm = [b for b in self._backends
+                    if getattr(b, "enabled", True)
+                    and not getattr(b, "in_cooldown", lambda: False)()
+                    and self._has_loaded(b, speaker_id)]
+            if warm:
+                # ロード済みの台どうしで順番に回す（1台に偏らない）
+                self._warm_rr = getattr(self, "_warm_rr", -1) + 1
+                return warm[self._warm_rr % len(warm)]
+        return self.next()
+
+    def remember(self, session: Optional[str], backend: AnyBackend) -> None:
+        """合成に成功した台を、このセッションの定位置にする（使うたびに期限を延ばす）。"""
+        ttl = settings.session_sticky_ttl
+        if not session or ttl <= 0 or len(self._backends) <= 1:
+            return
+        now = time.monotonic()
+        if len(self._sticky) >= 1000:   # 溜まりすぎないよう、期限切れを掃除
+            self._sticky = {k: v for k, v in self._sticky.items() if now - v[1] <= ttl}
+        self._sticky[session] = (backend, now)
 
     def pick_other(self, failed: AnyBackend) -> Optional[AnyBackend]:
         """失敗した台以外から、やり直し先を1台選ぶ。元気な台を優先し、いなければ None。"""
