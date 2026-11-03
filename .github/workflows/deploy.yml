@@ -1,0 +1,38 @@
+name: Deploy to h-2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-h-2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, h-2]
+    defaults:
+      run:
+        working-directory: /home/hit/docker/hit-aivis-router
+    steps:
+      - name: Pull latest code
+        run: git pull --ff-only
+
+      - name: Build and restart
+        run: docker compose up -d --build
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health >/dev/null; then
+              echo "healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "health check failed" >&2
+          docker compose logs --tail 50
+          exit 1
+
+      - name: Prune old images
+        run: docker image prune -f
