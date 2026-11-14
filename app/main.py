@@ -117,7 +117,7 @@ def _resolve_cloud_user_dict_uuid() -> str:
 async def lifespan(app: FastAPI):
     global pool, replacer, presets
     speech_history.init(Path(settings.speech_history_db))
-    replacer = TextReplacer(Path(settings.text_replacements_file), seed_file=Path("/srv/name.txt"))
+    replacer = TextReplacer(Path(settings.text_replacements_file), seed_file=Path(settings.seed_file))
     presets = SpeakerPresetManager(Path(settings.speaker_presets_file))
     pool = BackendPool(settings.backend_urls, idle_timeout=settings.model_idle_timeout)
     if pool.is_cloud:
@@ -176,7 +176,8 @@ async def no_cache_middleware(request, call_next):
 
 # --- ここまで ---
 
-app.mount("/static", StaticFiles(directory="/srv/static"), name="static")
+if Path(settings.static_dir).is_dir():
+    app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
 
 
 @app.get("/docs", include_in_schema=False)

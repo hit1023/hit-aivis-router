@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     llm_model: str = ""  # empty = disabled; e.g. "gemma3", "llama3.2"
     llm_config_file: str = "/data/llm_config.json"  # 設定画面からの上書き(環境変数より優先)
 
+    # --- 配置先（Docker の既定値。デスクトップ版などは環境変数で上書きする） ---
+    static_dir: str = "/srv/static"      # /docs・/redoc 用の JS/CSS。無ければ /static は載せない
+    seed_file: str = "/srv/name.txt"     # 置換ルールの初期インポート元。無ければ何もしない
+    ffmpeg_path: str = ""                # 空なら PATH の ffmpeg。同梱版を使うときに指定する
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property
