@@ -476,7 +476,7 @@ MP3（音声は pydub+ffmpeg で変換。デスクトップ版は libsndfile）�
   ├─ 管理 API（/backends）  台の追加・削除・無効化・マスター切替（ADMIN_TOKEN）。追加時は不足モデルと辞書を自動で配る
   ├─ モデルインストール  ファイルと台ごとの状態を data/install_jobs に保存。再起動後に続きから再開、一時失敗は自動再試行
   ├─ イベント配信（EventBus）  進捗を Zenoh の pub/sub で流し、/events/install（SSE）でブラウザへ中継
-  │                          Zenoh に繋がらなければ進程内配信に切り替わる（デスクトップ版は進程内のみ）
+  │                          Zenoh に繋がらなければプロセス内配信に切り替わる（デスクトップ版はプロセス内のみ）
   └─ data/（永続化）  backends.json / speaker_presets.json / text_replacements.json / speech_history.db / install_jobs/
 ```
 
@@ -596,7 +596,7 @@ MP3（音声は pydub+ffmpeg で変換。デスクトップ版は libsndfile）�
 - key expression: `aivis/install/<job>/start` / `node`（台ごとの `started`・`retry`・`done`・`failed`、試行回数 `attempt`、エラー `error`）/ `resume`（再起動後の再開。残りの台 `pending` 付き）/ `finish`
 - `aivis/install/status` への**問い合わせ**（queryable）に、いまのジョブの状態（JSON）を返します。購読していなくても、1回の問い合わせで現状が分かります
 - `docker-compose.yml` の `zenoh` サービス（eclipse/zenoh）に、ルーターが client として接続します（`ZENOH_ENDPOINT`、既定 `tcp/zenoh:7447`）
-- `ZENOH_ENDPOINT` を空にするか Zenoh に繋がらないときは、進程内の配信にフォールバックします（機能は落ちません。問い合わせの口は使えなくなります）
+- `ZENOH_ENDPOINT` を空にするか Zenoh に繋がらないときは、プロセス内の配信にフォールバックします（機能は落ちません。問い合わせの口は使えなくなります）
 - 状態の確認だけなら HTTP の `GET /models/install/status`
 
 別のクライアントから購読・問い合わせして試すには:

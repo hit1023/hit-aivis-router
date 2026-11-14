@@ -41,10 +41,10 @@ class EventBus:
         self._state_provider = fn
 
     async def start(self, endpoint: str) -> None:
-        """endpoint 例: tcp/zenoh:7447。空なら Zenoh を使わず進程内配信のみ。"""
+        """endpoint 例: tcp/zenoh:7447。空なら Zenoh を使わずプロセス内配信のみ。"""
         self._loop = asyncio.get_running_loop()
         if not endpoint:
-            logger.info("Zenoh 無効（ZENOH_ENDPOINT 未設定）: 進程内でイベントを配信します")
+            logger.info("Zenoh 無効（ZENOH_ENDPOINT 未設定）: プロセス内でイベントを配信します")
             return
         try:
             import zenoh
@@ -58,7 +58,7 @@ class EventBus:
             logger.info("Zenoh に接続しました: %s（購読 %s）", endpoint, SUBSCRIBE_KEY)
         except Exception as exc:
             self._session = None
-            logger.warning("Zenoh に接続できません（進程内配信にフォールバック）: %s", exc)
+            logger.warning("Zenoh に接続できません（プロセス内配信にフォールバック）: %s", exc)
 
     async def close(self) -> None:
         try:
@@ -83,7 +83,7 @@ class EventBus:
                 self._session.put(key, json.dumps(data, ensure_ascii=False))
                 return  # 購読コールバック経由で配られる
             except Exception as exc:
-                logger.warning("Zenoh publish に失敗（進程内配信に切替）: %s", exc)
+                logger.warning("Zenoh publish に失敗（プロセス内配信に切替）: %s", exc)
         self._fanout(data)
 
     # --- 購読 ---------------------------------------------------------------
