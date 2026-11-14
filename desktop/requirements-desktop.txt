@@ -2,8 +2,7 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 httpx==0.27.2
-pydub==0.25.1
 pydantic-settings==2.5.2
 python-multipart==0.0.12
 pyinstaller==6.11.1
-imageio-ffmpeg==0.6.0
+soundfile==0.14.0   # MP3 変換（libsndfile 同梱・LGPL）。ffmpeg は同梱しない

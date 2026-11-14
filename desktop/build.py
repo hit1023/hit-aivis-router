@@ -33,32 +33,25 @@ def main() -> None:
     run(py, "-m", "pip", "install", "-q", "--upgrade", "pip")
     run(py, "-m", "pip", "install", "-q", "-r", HERE / "requirements-desktop.txt")
 
-    ffmpeg = subprocess.run(
-        [str(py), "-c", "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
     (out / "work").mkdir(parents=True, exist_ok=True)
-    (out / "extra").mkdir(parents=True, exist_ok=True)
-    ff_name = "ffmpeg.exe" if WIN else "ffmpeg"
-    ff = out / "extra" / ff_name
-    shutil.copyfile(ffmpeg, ff)
-    ff.chmod(0o755)
 
-    # --add-binary の区切りは Windows が ";"、それ以外が ":"
-    sep = ";" if WIN else ":"
+    # MP3 変換に使う libsndfile（soundfile 同梱、LGPL）が、この OS で MP3 を書けるか先に確かめる
+    run(py, "-c", "import soundfile as sf; assert 'MP3' in sf.available_formats(), 'libsndfile に MP3 が無い'; print('libsndfile', sf.__libsndfile_version__, 'MP3 OK')")
+
     run(
         bindir / "pyinstaller", "--noconfirm", "--clean", "--onedir", "--name", "aivis-router",
         "--distpath", out, "--workpath", out / "work", "--specpath", out / "work",
         "--paths", ROOT,
         "--collect-submodules", "uvicorn",
         "--collect-submodules", "app",
-        "--add-binary", f"{ff}{sep}.",
         "--exclude-module", "zenoh",
         "--exclude-module", "tkinter",
         HERE / "entry.py",
         cwd=ROOT,
     )
     exe = out / "aivis-router" / ("aivis-router.exe" if WIN else "aivis-router")
+    # 固めた実行ファイルだけで MP3 変換が動くか確認（libsndfile の取り込み漏れを検出）
+    run(exe, "--selftest")
     print(f"OK: {exe}")
 
 
