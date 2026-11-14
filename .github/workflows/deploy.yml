@@ -1,4 +1,4 @@
-name: Deploy to h-2
+name: Deploy (self-hosted runner)
 
 on:
   push:
