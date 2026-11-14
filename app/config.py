@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     # 初回だけ遅くなるため）。最後の合成から無通信がこの秒数続くとセッション切れ。0で無効。
     session_sticky_ttl: int = 600
     # 起動後に各台のモデルを1本ずつ先にロードしておく（初回の応答が数十秒かかるのを防ぐ）。
-    warmup_on_start: bool = True
+    # 既定はオフ: メモリの小さい台（CPUのみの8GB機など）で全モデルが常駐してメモリを逼迫するため。
+    # 十分なメモリ/VRAMがある台で冷えた初回を避けたいときだけ true にする。
+    warmup_on_start: bool = False
     # 起動後も、この秒数ごとに各台を見回り、冷えているモデル（エンジン再起動など）を温め直す。
     warmup_interval: float = 60.0
     # 設定画面から編集した台の一覧の保存先。ファイルがあれば AIVIS_BACKEND_URLS より優先する。

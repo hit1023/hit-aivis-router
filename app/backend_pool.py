@@ -1055,6 +1055,10 @@ class BackendPool:
             for model, sid in first_style.items():
                 if b.manager._loaded.get(model) or model in skip:
                     continue
+                # アイドルで自動アンロードしたモデルは、次に実際に使われるまで読み直さない
+                # （読み直すと MODEL_IDLE_TIMEOUT の意味がなくなりメモリが解放されない）
+                if model in b.manager.idle_unloaded:
+                    continue
                 # 同じモデルを複数の台に載せない: 他の台に載っている / 定位置が別の台なら温めない
                 home = self.home_for(sid)
                 if home is not None and home is not b:

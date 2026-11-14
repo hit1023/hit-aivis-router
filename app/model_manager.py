@@ -26,6 +26,8 @@ class ModelManager:
         self._loaded: dict[str, bool] = {}
         # aivm_uuid -> last used timestamp
         self._last_used: dict[str, float] = {}
+        # アイドル時間で自動アンロードしたモデル。ウォームアップ巡回が勝手に読み直さないための記録。
+        self.idle_unloaded: set[str] = set()
 
     async def refresh(self) -> None:
         """Rebuild style_id → aivm_uuid mapping from AIVIS."""
@@ -77,6 +79,7 @@ class ModelManager:
                 logger.info("Loading model %s for speaker %d", aivm_uuid, speaker_id)
                 await self.client.load_model(aivm_uuid)
                 self._loaded[aivm_uuid] = True
+            self.idle_unloaded.discard(aivm_uuid)  # 実際に使われた → 再び通常管理に戻す
 
             self._last_used[aivm_uuid] = time.monotonic()
             return aivm_uuid
@@ -95,5 +98,7 @@ class ModelManager:
                         await self.client.unload_model(uuid)
                         self._loaded[uuid] = False
                         self._last_used.pop(uuid)  # Bug2修正: アンロード後にタイムスタンプを削除
+                        # ウォームアップの巡回が読み直さないよう覚えておく（使われたら外れる）
+                        self.idle_unloaded.add(uuid)
                     except Exception as exc:
                         logger.warning("Failed to unload %s: %s", uuid, exc)
