@@ -5,7 +5,12 @@
 直接配る（機能は落とさない）。
 
 key expression の例:
-    aivis/install/<job>/start | node | finish
+    aivis/install/<job>/start | node | retry の node 内 | resume | finish
+    node は {backend_url, status: started|retry|done|failed, attempt, error}
+
+Zenoh につながっていれば、次のこともできる（SSE を経由せず、Zenoh のクライアントから直接）:
+    購読   aivis/install/**        … インストールの進捗をリアルタイムで受け取る
+    問い合わせ aivis/install/status … いまのジョブの状態（running/done/failed と各台の様子）を1回取る
 """
 import asyncio
 import json
@@ -15,6 +20,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 SUBSCRIBE_KEY = "aivis/install/**"
+STATUS_KEY = "aivis/install/status"
 
 
 class EventBus:
@@ -22,11 +28,17 @@ class EventBus:
         self._queues: set[asyncio.Queue] = set()
         self._session = None
         self._subscriber = None
+        self._queryable = None
+        self._state_provider = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
     def zenoh_enabled(self) -> bool:
         return self._session is not None
+
+    def set_state_provider(self, fn) -> None:
+        """`aivis/install/status` への問い合わせに答える関数（dict を返す）を登録する。"""
+        self._state_provider = fn
 
     async def start(self, endpoint: str) -> None:
         """endpoint 例: tcp/zenoh:7447。空なら Zenoh を使わず進程内配信のみ。"""
@@ -42,6 +54,7 @@ class EventBus:
             }))
             self._session = await asyncio.to_thread(zenoh.open, conf)
             self._subscriber = self._session.declare_subscriber(SUBSCRIBE_KEY, self._on_sample)
+            self._queryable = self._session.declare_queryable(STATUS_KEY, self._on_query)
             logger.info("Zenoh に接続しました: %s（購読 %s）", endpoint, SUBSCRIBE_KEY)
         except Exception as exc:
             self._session = None
@@ -51,12 +64,15 @@ class EventBus:
         try:
             if self._subscriber is not None:
                 self._subscriber.undeclare()
+            if self._queryable is not None:
+                self._queryable.undeclare()
             if self._session is not None:
                 await asyncio.to_thread(self._session.close)
         except Exception as exc:
             logger.warning("Zenoh の終了処理に失敗: %s", exc)
         self._session = None
         self._subscriber = None
+        self._queryable = None
 
     # --- 発行 ---------------------------------------------------------------
 
@@ -80,6 +96,14 @@ class EventBus:
             return
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._fanout, data)
+
+    def _on_query(self, query) -> None:
+        # Zenoh のスレッドから呼ばれる。状態を JSON で返すだけ（イベントループには触れない）
+        try:
+            state = self._state_provider() if self._state_provider else {"state": "idle"}
+            query.reply(STATUS_KEY, json.dumps(state, ensure_ascii=False))
+        except Exception as exc:
+            logger.warning("Zenoh の問い合わせに答えられません: %s", exc)
 
     def _fanout(self, data: dict) -> None:
         for q in list(self._queues):

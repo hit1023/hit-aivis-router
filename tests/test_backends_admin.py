@@ -554,6 +554,170 @@ async def test_install_publishes_progress_events(client, monkeypatch):
     assert got[-1] == ("finish", None)
 
 
+# --- インストールの再試行・再開 -----------------------------------------------
+
+@pytest.fixture()
+def install_env(tmp_path, monkeypatch):
+    """インストールジョブの保存先を一時ディレクトリにし、前のテストの状態を消す。"""
+    from app import main as m
+    monkeypatch.setattr(settings, "install_jobs_dir", str(tmp_path / "jobs"))
+    monkeypatch.setattr(settings, "install_retry_base", 0.01)
+    m._install_job.clear()
+    return m
+
+
+async def _wait_job(client, states=("done", "failed")):
+    for _ in range(200):
+        st = (await client.get("/models/install/status")).json()
+        if st["state"] in states:
+            return st
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"job did not finish: {st}")
+
+
+@pytest.mark.asyncio
+async def test_install_retries_transient_failure(client, monkeypatch, install_env):
+    import httpx
+    from app.events import bus
+    calls = []
+
+    async def flaky(self, filename, data):
+        calls.append(1)
+        if len(calls) < 3:
+            raise httpx.ConnectError("refused")
+    monkeypatch.setattr(AivisClient, "install_model", flaky)
+    q = bus.subscribe()
+    try:
+        r = await client.post("/models/install", files={"file": ("a.aivmx", b"x")})
+        assert r.status_code == 202
+        st = await _wait_job(client)
+    finally:
+        got = []
+        while not q.empty():
+            ev = q.get_nowait()
+            got.append((ev["type"], ev.get("status")))
+        bus.unsubscribe(q)
+    assert st["state"] == "done" and len(calls) == 3
+    assert list(st["nodes"].values())[0]["attempts"] == 3
+    assert got.count(("node", "retry")) == 2
+    # 全部済んだので、大きいファイルは残さない
+    assert not install_env._store().has_data(st["job_id"])
+
+
+@pytest.mark.asyncio
+async def test_install_does_not_retry_client_error(client, monkeypatch, install_env):
+    import httpx
+    calls = []
+
+    async def bad(self, filename, data):
+        calls.append(1)
+        raise httpx.HTTPStatusError("bad", request=httpx.Request("POST", "http://x"), response=httpx.Response(422))
+    monkeypatch.setattr(AivisClient, "install_model", bad)
+    await client.post("/models/install", files={"file": ("a.aivmx", b"x")})
+    st = await _wait_job(client)
+    assert st["state"] == "failed" and len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_install_persists_job_and_retry_endpoint_redoes_failed_nodes(client, monkeypatch, install_env):
+    import httpx
+    m = install_env
+    m.pool = BackendPool(["http://192.168.0.21:10101", "http://192.168.0.22:10101"], store_path=client.store)
+    bad_up = [True]
+    sent = []
+
+    async def fake(self, filename, data):
+        sent.append(self.base_url)
+        if "22" in self.base_url and bad_up[0]:
+            raise httpx.ConnectError("refused")
+    monkeypatch.setattr(AivisClient, "install_model", fake)
+    monkeypatch.setattr(settings, "install_max_attempts", 2)
+    await client.post("/models/install", files={"file": ("a.aivmx", b"model")})
+    st = await _wait_job(client)
+    # 1台は成功・1台は失敗 → done だが、やり直せる状態でファイルを残している
+    assert st["state"] == "done" and st["retryable"] is True and "1/2" in st["message"]
+    assert m._store().read_data(st["job_id"]) == b"model"
+    assert (await client.post("/models/install/retry")).status_code == 202
+    bad_up[0] = False
+    st = await _wait_job(client)
+    # やり直しは失敗した台だけ（21 には送り直さない）
+    assert st["state"] == "done" and not st.get("retryable") and "2/2" in st["message"]
+    assert sent.count("http://192.168.0.21:10101") == 1
+    assert not m._store().has_data(st["job_id"])
+    assert (await client.post("/models/install/retry")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_interrupted_install_resumes_remaining_nodes_after_restart(client, monkeypatch, install_env):
+    from app.events import bus
+    m = install_env
+    m.pool = BackendPool(["http://192.168.0.21:10101", "http://192.168.0.22:10101"], store_path=client.store)
+    sent = []
+
+    async def fake(self, filename, data):
+        sent.append((self.base_url, data))
+    monkeypatch.setattr(AivisClient, "install_model", fake)
+    # 再起動の直前の状態を作る: 21 は済み、22 は送信中に落ちた
+    job = {
+        "job_id": "abcd1234", "state": "running", "filename": "a.aivmx", "results": [], "message": "インストール中...",
+        "created": 1.0,
+        "nodes": {
+            "http://192.168.0.21:10101": {"status": "done", "attempts": 1, "error": None},
+            "http://192.168.0.22:10101": {"status": "running", "attempts": 1, "error": None},
+        },
+    }
+    m._store().create(job, b"model-bytes")
+    m._install_job.clear()  # プロセスが新しくなった想定（メモリは空）
+    q = bus.subscribe()
+    try:
+        await m._resume_install_jobs()
+        st = await _wait_job(client)
+    finally:
+        got = []
+        while not q.empty():
+            ev = q.get_nowait()
+            got.append(ev)
+        bus.unsubscribe(q)
+    assert st["job_id"] == "abcd1234" and st["state"] == "done" and "2/2" in st["message"]
+    assert sent == [("http://192.168.0.22:10101", b"model-bytes")]   # 残りの台だけ、同じファイルを送る
+    resume = [e for e in got if e["type"] == "resume"]
+    assert resume and resume[0]["pending"] == ["http://192.168.0.22:10101"]
+    assert not m._store().has_data("abcd1234")
+
+
+@pytest.mark.asyncio
+async def test_resume_without_file_reports_failure(client, install_env):
+    m = install_env
+    job = {"job_id": "dead0000", "state": "running", "filename": "a.aivmx", "created": 1.0,
+           "nodes": {"http://192.168.0.21:10101": {"status": "running", "attempts": 1, "error": None}}}
+    m._store().create(job, b"x")
+    m._store().discard_data("dead0000")
+    m._install_job.clear()
+    await m._resume_install_jobs()
+    st = (await client.get("/models/install/status")).json()
+    assert st["state"] == "failed" and "もう一度アップロード" in st["message"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_backend_failure_is_not_retried_or_blocking(client, monkeypatch, install_env):
+    import httpx
+    m = install_env
+    m.pool = BackendPool(["http://192.168.0.21:10101", "http://192.168.0.22:10101"], store_path=client.store)
+    m.pool._backends[1].enabled = False
+    calls = []
+
+    async def fake(self, filename, data):
+        calls.append(self.base_url)
+        if "22" in self.base_url:
+            raise httpx.ConnectError("refused")
+    monkeypatch.setattr(AivisClient, "install_model", fake)
+    await client.post("/models/install", files={"file": ("a.aivmx", b"x")})
+    st = await _wait_job(client)
+    assert calls.count("http://192.168.0.22:10101") == 1          # 無効な台は1回だけ
+    assert st["state"] == "done" and not st["retryable"]           # やり直し対象にしない
+    assert not m._store().has_data(st["job_id"])
+
+
 # --- 不調な台の退避・やり直し --------------------------------------------------
 
 def _two_backend_pool(tmp_path, monkeypatch):

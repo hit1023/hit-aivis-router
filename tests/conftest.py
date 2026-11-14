@@ -20,6 +20,8 @@ for _name, _file in {
     "SPEECH_HISTORY_DB": "speech_history.db",
 }.items():
     os.environ.setdefault(_name, os.path.join(_tmp_data, _file))
+os.environ.setdefault("INSTALL_JOBS_DIR", os.path.join(_tmp_data, "install_jobs"))
+os.environ.setdefault("INSTALL_RETRY_BASE", "0.01")  # 再試行の待ちをテストで短くする
 
 _tmp_static = tempfile.mkdtemp()
 _orig_static_init = starlette.staticfiles.StaticFiles.__init__

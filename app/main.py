@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -29,6 +30,7 @@ from .backend_pool import (
     SynthesisFailed,
 )
 from .events import bus
+from .install_jobs import InstallJobStore
 from .splitter import split_sentences
 from .config import settings
 from .speaker_preset import SpeakerPresetManager
@@ -130,7 +132,9 @@ async def lifespan(app: FastAPI):
         await pool.initialize()
     except Exception as exc:
         logger.warning("Backend initialization failed (will retry on first request): %s", exc)
+    bus.set_state_provider(lambda: dict(_install_job) or {"state": "idle"})
     await bus.start(settings.zenoh_endpoint)
+    await _resume_install_jobs()
     cleanup_task = asyncio.create_task(pool.start_cleanup_loop())
     async def _warm():
         await pool.warmup()
@@ -471,6 +475,30 @@ async def list_models():
 
 _install_job: dict = {}
 _install_tasks: set = set()
+_install_store: Optional[InstallJobStore] = None
+
+_NODE_STATUS = {"started": "running", "retry": "retrying", "done": "done", "failed": "failed"}
+
+
+def _store() -> InstallJobStore:
+    global _install_store
+    if _install_store is None or str(_install_store.root) != settings.install_jobs_dir:
+        _install_store = InstallJobStore(settings.install_jobs_dir)
+    return _install_store
+
+
+def _persist_job() -> None:
+    """ジョブの状態をディスクへ。失敗しても、インストール自体は止めない。"""
+    try:
+        _store().save(_install_job)
+    except OSError as exc:
+        logger.warning("インストール状態の保存に失敗: %s", exc)
+
+
+def _start_install_task(job_id: str, filename: str, data: bytes, urls: Optional[list] = None) -> None:
+    task = asyncio.create_task(_run_install(job_id, filename, data, urls))
+    _install_tasks.add(task)
+    task.add_done_callback(_install_tasks.discard)
 
 
 @app.post(
@@ -481,6 +509,8 @@ _install_tasks: set = set()
 
 - 複数バックエンドが設定されている場合は全台へ並列にインストールします
 - 応答は即座に `202` で返り、インストールは裏で進みます。結果は `GET /models/install/status` で確認します
+- 受け取ったファイルと各台の状態はディスクに保存します。ルーターが再起動しても、起動時に残りの台へ続きから再開します
+- 台への送信が一時的に失敗したとき（接続できない・タイムアウト・5xx）は、自動で数回やり直します
 - インストール完了後、スピーカーマッピングを自動で更新します
 - ファイルサイズによっては完了まで数分かかる場合があります
 """,
@@ -496,41 +526,132 @@ async def install_model(file: UploadFile = File(...)):
     data = await file.read()
     job_id = uuid.uuid4().hex[:8]
     _install_job.clear()
-    _install_job.update({"job_id": job_id, "state": "running", "filename": filename, "results": [], "message": "インストール中..."})
+    _install_job.update({
+        "job_id": job_id, "state": "running", "filename": filename, "results": [],
+        "message": "インストール中...", "created": time.time(),
+        "nodes": {u: {"status": "pending", "attempts": 0, "error": None} for u in pool.install_urls()},
+    })
+    try:
+        _store().create(_install_job, data)
+    except OSError as exc:
+        logger.warning("モデルファイルの保存に失敗（再起動後の再開はできません）: %s", exc)
     bus.publish(f"aivis/install/{job_id}/start", {"type": "start", "job_id": job_id, "filename": filename})
-    task = asyncio.create_task(_run_install(job_id, filename, data))
-    _install_tasks.add(task)
-    task.add_done_callback(_install_tasks.discard)
+    _start_install_task(job_id, filename, data)
     return JSONResponse(
         status_code=202,
         content={"job_id": job_id, "filename": filename, "state": "running", "message": "受け付けました。インストールは裏で進みます"},
     )
 
 
-async def _run_install(job_id: str, filename: str, data: bytes) -> None:
-    """アップロード応答を待たせないよう、インストールはバックグラウンドで行う。"""
+async def _run_install(job_id: str, filename: str, data: bytes, urls: Optional[list] = None) -> None:
+    """アップロード応答を待たせないよう、インストールはバックグラウンドで行う。
+
+    urls を渡すと、その台だけをやり直す（再起動後の再開・失敗した台の再試行）。
+    """
+    nodes = _install_job.setdefault("nodes", {})
+
     def on_event(ev: dict) -> None:
+        node = nodes.setdefault(ev["backend_url"], {"status": "pending", "attempts": 0, "error": None})
+        node["status"] = _NODE_STATUS.get(ev["status"], node["status"])
+        node["attempts"] = ev.get("attempt", node["attempts"])
+        node["error"] = ev.get("error")
+        node["optional"] = bool(ev.get("optional"))
+        _persist_job()
         bus.publish(f"aivis/install/{job_id}/node", {"type": "node", "job_id": job_id, **ev})
 
     try:
-        results = await pool.install_model(filename, data, on_event=on_event)
-        failed = [r for r in results if not r["success"]]
-        ok = len(results) - len(failed)
+        known = {u.rstrip("/") for u in pool.install_urls()}
+        for u in list(urls if urls is not None else nodes):
+            if u.rstrip("/") not in known:  # 再開のあいだに設定から外された台
+                nodes[u] = {"status": "failed", "attempts": 0, "error": "設定に無い台です", "optional": True}
+        await pool.install_model(filename, data, on_event=on_event, urls=urls)
+        ok = [u for u, n in nodes.items() if n["status"] == "done"]
+        failed = [u for u, n in nodes.items() if n["status"] != "done"]
+        # 無効にしてある台の失敗は、やり直しの対象にしない（落ちていることが多い）
+        must_retry = [u for u in failed if not nodes[u].get("optional")]
         _install_job.update({
-            "state": "failed" if ok == 0 else "done",
-            "results": results,
+            "state": "failed" if not ok else "done",
+            "results": [
+                {"backend_url": u, "success": n["status"] == "done", **({"error": n["error"]} if n["error"] else {})}
+                for u, n in nodes.items()
+            ],
             "message": (
-                "全バックエンドでインストールに失敗しました" if ok == 0
-                else f"{ok}/{len(results)} バックエンドにインストールしました"
+                "全バックエンドでインストールに失敗しました" if not ok
+                else f"{len(ok)}/{len(nodes)} バックエンドにインストールしました"
+                     + (f"（失敗 {len(must_retry)} 台。/models/install/retry でやり直せます）" if must_retry else "")
             ),
+            "retryable": bool(must_retry),
         })
+        if not must_retry:
+            _store().discard_data(job_id)  # 全て済んだら、大きいファイルは残さない
     except Exception as exc:
         logger.error("install job crashed: %s", exc)
-        _install_job.update({"state": "failed", "message": f"インストールに失敗しました: {exc}"})
+        _install_job.update({"state": "failed", "message": f"インストールに失敗しました: {exc}", "retryable": True})
+    _persist_job()
     bus.publish(f"aivis/install/{job_id}/finish", {
         "type": "finish", "job_id": job_id,
         "state": _install_job.get("state"), "message": _install_job.get("message"),
     })
+
+
+async def _resume_install_jobs() -> None:
+    """再起動で途中になったインストールを、残りの台へ続きから再開する。"""
+    if pool.is_cloud:
+        return
+    try:
+        store = _store()
+        store.prune()
+        jobs = store.load_all()
+    except OSError as exc:
+        logger.warning("インストール状態の読み込みに失敗: %s", exc)
+        return
+    if not jobs:
+        return
+    job = jobs[0]  # 新しい順。ジョブは常に1つだけ残す想定
+    _install_job.clear()
+    _install_job.update(job)
+    if job.get("state") != "running":
+        return  # 前回で終わっているジョブ（失敗の再試行待ちなど）は、状態だけ復元する
+    job_id, filename = job["job_id"], job.get("filename", "model.aivmx")
+    data = store.read_data(job_id)
+    pending = [u for u, n in job.get("nodes", {}).items() if n.get("status") != "done"]
+    if data is None or not pending:
+        _install_job.update({"state": "failed", "message": "再起動でインストールが中断し、ファイルも残っていませんでした。もう一度アップロードしてください"})
+        _persist_job()
+        return
+    logger.info("インストール %s を再開します（残り %d 台）", job_id, len(pending))
+    _install_job["message"] = f"再起動のあと、残り {len(pending)} 台のインストールを再開しました"
+    bus.publish(f"aivis/install/{job_id}/resume", {
+        "type": "resume", "job_id": job_id, "filename": filename, "pending": pending,
+    })
+    _start_install_task(job_id, filename, data, pending)
+
+
+@app.post(
+    "/models/install/retry",
+    summary="失敗した台へのインストールをやり直す",
+    description="直近のインストールで失敗した台だけに、残してあるモデルファイルをもう一度送ります（`retryable` が true のとき）。",
+    tags=["モデル管理"],
+)
+async def retry_install():
+    _reject_if_cloud("モデルのインストール")
+    if _install_job.get("state") == "running":
+        raise HTTPException(status_code=409, detail="別のインストールが実行中です。完了までお待ちください")
+    job_id = _install_job.get("job_id")
+    if not job_id or not _install_job.get("retryable"):
+        raise HTTPException(status_code=404, detail="やり直せるインストールがありません")
+    data = _store().read_data(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="モデルファイルが残っていません。もう一度アップロードしてください")
+    nodes = _install_job.get("nodes", {})
+    pending = [u for u, n in nodes.items() if n.get("status") != "done" and not n.get("optional")]
+    _install_job.update({"state": "running", "message": f"失敗した {len(pending)} 台をやり直しています...", "retryable": False})
+    _persist_job()
+    bus.publish(f"aivis/install/{job_id}/start", {
+        "type": "start", "job_id": job_id, "filename": _install_job.get("filename"), "retry": True,
+    })
+    _start_install_task(job_id, _install_job.get("filename", "model.aivmx"), data, pending)
+    return JSONResponse(status_code=202, content={"job_id": job_id, "state": "running", "pending": pending})
 
 
 @app.get(

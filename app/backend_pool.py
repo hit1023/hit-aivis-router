@@ -1206,27 +1206,52 @@ class BackendPool:
         await asyncio.gather(*(b.manager.refresh() for b in self._backends), return_exceptions=True)
         return results
 
-    async def install_model(self, filename: str, data: bytes, on_event=None) -> list[dict]:
-        """aivmxファイルを全バックエンドにインストールする。各バックエンドの結果を返す。"""
+    def install_urls(self) -> list[str]:
+        """インストールの対象になる台（マスター → 他の台）の URL。"""
+        if self.is_cloud:
+            return []
+        return [b.url for b in [self.master, *self._followers()]]
+
+    async def install_model(self, filename: str, data: bytes, on_event=None, urls=None) -> list[dict]:
+        """aivmxファイルを台にインストールする。各台の結果を返す。
+
+        urls を渡すと、その台だけに送る（再開・再試行用）。
+        一時的な失敗（接続できない・タイムアウト・5xx）は、待ち時間を延ばしながら数回やり直す。
+        無効にしてある台は1回だけ試す（落ちていることが多く、待たせないため）。
+        """
         if self.is_cloud:
             raise NotImplementedError("Aivis Cloud ではモデルのインストールはできません")
         targets = [self.master, *self._followers()]
+        if urls is not None:
+            want = {u.rstrip("/") for u in urls}
+            targets = [b for b in targets if b.url.rstrip("/") in want]
 
         def _emit(**kw):
             if on_event:
                 on_event(kw)
 
         async def _one(b):
-            _emit(backend_url=b.url, status="started")
-            try:
-                await b.client.install_model(filename, data)
+            optional = not b.enabled
+            attempts = 1 if optional else max(1, settings.install_max_attempts)
+            for n in range(1, attempts + 1):
+                _emit(backend_url=b.url, status="started", attempt=n, optional=optional)
+                try:
+                    await b.client.install_model(filename, data)
+                except Exception as exc:
+                    reason = str(exc) or type(exc).__name__
+                    if n < attempts and _is_node_fault(exc):
+                        delay = settings.install_retry_base * (3 ** (n - 1))
+                        logger.warning("Model install failed on %s (%d/%d): %s — %.0f秒後に再試行",
+                                       b.url, n, attempts, reason, delay)
+                        _emit(backend_url=b.url, status="retry", attempt=n, delay=delay, error=reason, optional=optional)
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error("Model install failed on %s: %s", b.url, reason)
+                    _emit(backend_url=b.url, status="failed", attempt=n, error=reason, optional=optional)
+                    return {"backend_url": b.url, "success": False, "error": reason}
                 logger.info("Model installed on %s", b.url)
-                _emit(backend_url=b.url, status="done")
+                _emit(backend_url=b.url, status="done", attempt=n, optional=optional)
                 return {"backend_url": b.url, "success": True}
-            except Exception as exc:
-                logger.error("Model install failed on %s: %s", b.url, exc)
-                _emit(backend_url=b.url, status="failed", error=str(exc))
-                return {"backend_url": b.url, "success": False, "error": str(exc)}
 
         # 全台へ並列に送る（順次だと台数×転送時間かかる）
         results = list(await asyncio.gather(*(_one(b) for b in targets)))

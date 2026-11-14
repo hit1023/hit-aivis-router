@@ -549,17 +549,30 @@ AIVIS Router (FastAPI)
 方式に `claude_cli` を選ぶと、コンテナ内の `claude -p` で判定します（イメージに Claude Code を同梱）。トークン欄には `claude setup-token` の OAuth トークンを入れます（従量課金のAPIキーではなくサブスク枠を消費）。節約策: haiku・ツール/MCP/スキル/設定読込をすべて無効化・最小システムプロンプト・単語ごとの結果を `/data/kana_llm_cache.json` にキャッシュ（同じ単語は再問い合わせしない）・複数単語を1回の呼び出しに集約。
 
 
-## モデルインストールの進捗配信（Zenoh + SSE）
+## モデルインストール（途中再開・自動再試行・進捗配信）
 
 `POST /models/install` は即座に `202` を返し、インストールは裏で全台へ並列に進みます。
+
+### 途中で止まっても続きから再開する
+
+- 受け取ったファイルと、台ごとの状態（pending / running / retrying / done / failed）を `data/install_jobs/<job>/` に保存します（`INSTALL_JOBS_DIR`）。
+- ルーターが再起動（デプロイ・メモリ不足・強制終了）しても、起動時に**まだ済んでいない台だけ**へ同じファイルを送り直します。済んでいる台には送りません。
+- 台への送信が一時的に失敗したとき（接続できない・タイムアウト・5xx）は、5秒→15秒と待ちを延ばして自動でやり直します（`INSTALL_MAX_ATTEMPTS`＝3回、`INSTALL_RETRY_BASE`＝5秒）。4xx（ファイルの不備など）はやり直しません。
+- 無効にしてある台は1回だけ試し、失敗してもジョブを失敗扱いにしません（落ちていることが多いため）。
+- すべての台が済んだらファイルは消します。失敗した台が残ったときだけ、24時間ファイルを残し、`POST /models/install/retry` で失敗した台だけやり直せます（`GET /models/install/status` の `retryable` が true のとき）。
+- Web UI は、ページを開き直しても進行中のインストールへ自動で再接続します。
+
+### 進捗を配信する（Zenoh + SSE）
+
 進捗は Zenoh の pub/sub で流れ、`GET /events/install`（SSE）でブラウザへ中継されます。
 
-- key expression: `aivis/install/<job>/start` / `node`（台ごとの started・done・failed）/ `finish`
+- key expression: `aivis/install/<job>/start` / `node`（台ごとの `started`・`retry`・`done`・`failed`、試行回数 `attempt`、エラー `error`）/ `resume`（再起動後の再開。残りの台 `pending` 付き）/ `finish`
+- `aivis/install/status` への**問い合わせ**（queryable）に、いまのジョブの状態（JSON）を返します。購読していなくても、1回の問い合わせで現状が分かります
 - `docker-compose.yml` の `zenoh` サービス（eclipse/zenoh）に、ルーターが client として接続します（`ZENOH_ENDPOINT`、既定 `tcp/zenoh:7447`）
-- `ZENOH_ENDPOINT` を空にするか Zenoh に繋がらないときは、進程内の配信にフォールバックします（機能は落ちません）
-- 状態の確認だけなら `GET /models/install/status`
+- `ZENOH_ENDPOINT` を空にするか Zenoh に繋がらないときは、進程内の配信にフォールバックします（機能は落ちません。問い合わせの口は使えなくなります）
+- 状態の確認だけなら HTTP の `GET /models/install/status`
 
-別のクライアントで購読して試すには（pub/sub の学習用）:
+別のクライアントから購読・問い合わせして試すには:
 
 ```bash
 pip install eclipse-zenoh
@@ -567,9 +580,10 @@ python3 -c "
 import zenoh, time
 s = zenoh.open(zenoh.Config.from_json5('{\"mode\":\"client\",\"connect\":{\"endpoints\":[\"tcp/<h-2のIP>:7447\"]}}'))
 s.declare_subscriber('aivis/install/**', lambda x: print(x.key_expr, x.payload.to_string()))
+for r in s.get('aivis/install/status', timeout=3): print('status:', r.ok.payload.to_string())
 time.sleep(600)"
 ```
-（ホストから繋ぐ場合は compose の zenoh に `ports: ["7447:7447"]` を足してください）
+（ホストから繋ぐ場合は compose の zenoh に `ports: ["7447:7447"]` を足してください。Zenoh 自体に認証は付けていないので、LAN の中だけに公開してください）
 
 
 ## 不調な台の自動回避（/speak）
@@ -603,4 +617,4 @@ CPU 合成は長文だと数秒かかるので、`POST /speak_stream` は文ご�
 
 - 音声合成は [AivisSpeech Engine](https://github.com/Aivis-Project/AivisSpeech-Engine)（LGPL-3.0）が行います。このリポジトリには含まれていません。
 - 音声モデルは [Aivis Hub](https://hub.aivis-project.com/) で配布されており、モデルごとの利用規約・ライセンスに従ってください。
-- デスクトップ版に同梱される ffmpeg（imageio-ffmpeg）は GPL のビルドです。詳細は [aivis-desktop の THIRD_PARTY_NOTICES.md](https://github.com/hit1023/aivis-desktop/blob/main/THIRD_PARTY_NOTICES.md) を参照してください。
+- MP3 への変換は、サーバー版（Docker）では ffmpeg（pydub 経由）、デスクトップ版では libsndfile（soundfile、LGPL-2.1）で行います（`MP3_ENCODER`）。デスクトップ版には ffmpeg を同梱しません。詳細は [aivis-desktop の THIRD_PARTY_NOTICES.md](https://github.com/hit1023/aivis-desktop/blob/main/THIRD_PARTY_NOTICES.md) を参照してください。

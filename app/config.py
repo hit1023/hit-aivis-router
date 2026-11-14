@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # 進捗イベント配信用 Zenoh ルーターのエンドポイント（例: tcp/zenoh:7447）。空なら進程内配信のみ。
     zenoh_endpoint: str = ""
 
+    # モデルのインストールを途中で止まっても続きから再開できるよう、受け取ったファイルと状態を置く場所。
+    install_jobs_dir: str = "/data/install_jobs"
+    # 台へのインストールが一時的に失敗したとき（接続できない・タイムアウト・5xx）の再試行回数と、最初の待ち秒数（3倍ずつ延ばす）。
+    install_max_attempts: int = 3
+    install_retry_base: float = 5.0
+
     # 管理系 API（/backends）を使うためのトークン。空なら管理系 API は無効（403）。
     admin_token: str = ""
 
@@ -62,6 +68,7 @@ class Settings(BaseSettings):
     static_dir: str = "/srv/static"      # /docs・/redoc 用の JS/CSS。無ければ /static は載せない
     seed_file: str = "/srv/name.txt"     # 置換ルールの初期インポート元。無ければ何もしない
     ffmpeg_path: str = ""                # 空なら PATH の ffmpeg。同梱版を使うときに指定する
+    mp3_encoder: str = "pydub"           # "pydub"（ffmpeg を使う。サーバー版の既定）/ "soundfile"（ffmpeg 不要。デスクトップ版）
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
