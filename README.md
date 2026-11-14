@@ -450,22 +450,49 @@ http://localhost:8000/redoc
 ## アーキテクチャ
 
 ```
-クライアント
-    ↓
+クライアント（KIOKUPETA / orb-hologram / Drift / hit-aivis-webui / デスクトップ版 ほか）
+    │  POST /speak（MP3 が応答で返る。同期）  /speak_stream（文ごとに NDJSON）
+    ▼
 AIVIS Router (FastAPI)
-    ↓ ラウンドロビン
-┌─────────────────────────┐
-│  AivisSpeech Engine #1  │
-│  AivisSpeech Engine #2  │
-│  ...                    │
-└─────────────────────────┘
+    ├─ テキスト置換（TextReplacer） → スピーカープリセット適用
+    ├─ 台の選択（BackendPool.pick）
+    │     ① そのモデルの定位置の台（同じモデルを2台に載せない）
+    │     ② 話者が分からなければ、セッションが前に成功した台 → ③ 順番
+    │     ※ 不調な台は30秒退避。失敗したら別の台で1回だけやり直す
+    ▼
+┌──────────────────────────────────────────────┐
+│ 台 #1  AivisSpeech Engine（GPU / CPU）          │  TTS_PROVIDER=local
+│ 台 #2  AivisSpeech Engine                      │
+│ ...                                            │
+│ または Aivis Cloud API（GPU 不要・従量課金）      │  TTS_PROVIDER=aivis_cloud
+└──────────────────────────────────────────────┘
+    ▼
+MP3（音声は pydub+ffmpeg で変換。デスクトップ版は libsndfile）＋ 発話履歴（SQLite）に記録
 ```
 
-- `BackendPool` — 複数バックエンドをラウンドロビンで管理
+```
+ルーターの周辺
+  ├─ 見回り（60秒ごと）  各台のモデルのロード状態を把握し、冷えたモデルを定位置の台で温め直す
+  ├─ 管理 API（/backends）  台の追加・削除・無効化・マスター切替（ADMIN_TOKEN）。追加時は不足モデルと辞書を自動で配る
+  ├─ モデルインストール  ファイルと台ごとの状態を data/install_jobs に保存。再起動後に続きから再開、一時失敗は自動再試行
+  ├─ イベント配信（EventBus）  進捗を Zenoh の pub/sub で流し、/events/install（SSE）でブラウザへ中継
+  │                          Zenoh に繋がらなければ進程内配信に切り替わる（デスクトップ版は進程内のみ）
+  └─ data/（永続化）  backends.json / speaker_presets.json / text_replacements.json / speech_history.db / install_jobs/
+```
+
+- `BackendPool` — 複数バックエンドの管理。台の選択（モデルの定位置・セッション・順番）、不調な台の退避と別の台でのやり直し、台の追加・削除・無効化・マスター切替
 - `ModelManager` — バックエンドごとのモデルロード状態とアイドルタイムアウトを管理
-- `AivisClient` — AivisSpeech Engine の HTTP API クライアント
+- `AivisClient` / `AivisCloudClient` — AivisSpeech Engine / Aivis Cloud API の HTTP クライアント
 - `TextReplacer` — 音声合成前テキスト前処理（最長マッチ優先の文字列置換）
+- `SpeakerPresetManager` — 話者ごとの話速・音高などの既定値
 - `SpeechHistory` — 発話履歴のSQLite非同期書き込み・ページネーション検索
+- `EventBus` — 進捗イベントの配信（Zenoh の pub/sub と、`aivis/install/status` への問い合わせ）
+- `InstallJobStore` — モデルインストールのジョブ（ファイルと台ごとの状態）の保存と、再起動後の再開
+- `audio` — WAV → MP3 の変換（サーバー版は pydub+ffmpeg、デスクトップ版は libsndfile）
+
+> 台ごとの同時実行数は `BACKEND_CONCURRENCY` で絞れます（既定 `0` = 制限なし）。1以上にすると、超えた分は
+> ルーター内で先着順に待ち、`BACKEND_QUEUE_TIMEOUT`（既定60秒）を超えると 503 + `Retry-After` を返します。
+> 台ごとの `inflight` / `waiting` は `/backends/status` で見られます。設計は [docs/queue-design.md](docs/queue-design.md)。
 
 ---
 

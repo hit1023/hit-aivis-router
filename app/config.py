@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     install_max_attempts: int = 3
     install_retry_base: float = 5.0
 
+    # 1台が同時に受け持つ合成の数。0 なら制限しない（従来どおり、来た分がそのまま台へ届く）。
+    # 1以上にすると、超えた分はルーターの中で順番待ち（先着順）になり、台が詰まって
+    # 全部がタイムアウトする事態を防げる。CPU版など非力な台向け。詳しくは docs/queue-design.md。
+    backend_concurrency: int = 0
+    # 順番待ちの最大秒数。これを超えたら 503 + Retry-After で返す（台の不調とは扱わない）。
+    backend_queue_timeout: float = 60.0
+
     # 管理系 API（/backends）を使うためのトークン。空なら管理系 API は無効（403）。
     admin_token: str = ""
 

@@ -26,6 +26,7 @@ from .backend_pool import (
     InvalidBackendURL,
     validate_backend_url,
     ModelLoadFailed,
+    QueueTimeout,
     SpeakerNotFound,
     SynthesisFailed,
 )
@@ -354,6 +355,10 @@ async def _speak_core(req: SpeakRequest, session: str) -> tuple[bytes, str]:
         pool.remember(session, backend)
     except SpeakerNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except QueueTimeout as exc:
+        logger.warning("%s", exc)
+        raise HTTPException(status_code=503, detail="音声合成が混み合っています。少し待ってからもう一度お試しください",
+                            headers={"Retry-After": "5"})
     except ModelLoadFailed as exc:
         logger.error("Model load failed: %s", exc)
         raise HTTPException(status_code=503, detail="音声モデルの読み込みに失敗しました")

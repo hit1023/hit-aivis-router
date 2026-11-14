@@ -50,6 +50,10 @@ class SynthesisFailed(Exception):
     """音声合成そのものに失敗した（→ 502）。"""
 
 
+class QueueTimeout(Exception):
+    """台の順番待ちが長すぎた（→ 503 + Retry-After）。台の不調ではないので退避はしない。"""
+
+
 # ---------------------------------------------------------------------------
 # スタイル ID の導出（Cloud 用）
 # ---------------------------------------------------------------------------
@@ -156,6 +160,10 @@ class Backend:
     cooldown_until: float = 0.0
     # False なら振り分けに使わない（登録は残す。設定画面の「無効化」）
     enabled: bool = True
+    # 同時実行数の制限（settings.backend_concurrency が 1 以上のとき）。合成中の数と、順番待ちの数。
+    inflight: int = 0
+    waiting: int = 0
+    _sem: Optional[asyncio.Semaphore] = field(default=None, init=False, repr=False)
 
     def in_cooldown(self) -> bool:
         return self.cooldown_until > time.monotonic()
@@ -165,6 +173,26 @@ class Backend:
         self.manager = ModelManager(self.client)
 
     async def synthesize_mp3(self, text: str, speaker_id: int, params: dict) -> bytes:
+        limit = settings.backend_concurrency
+        if limit <= 0:
+            return await self._synthesize_counted(text, speaker_id, params)
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(limit)   # asyncio.Semaphore は先着順（FIFO）で待たせる
+        self.waiting += 1
+        try:
+            await asyncio.wait_for(self._sem.acquire(), settings.backend_queue_timeout)
+        except asyncio.TimeoutError:
+            raise QueueTimeout(f"{self.url} の順番待ちが {settings.backend_queue_timeout:g} 秒を超えました")
+        finally:
+            self.waiting -= 1
+        self.inflight += 1
+        try:
+            return await self._synthesize_counted(text, speaker_id, params)
+        finally:
+            self.inflight -= 1
+            self._sem.release()
+
+    async def _synthesize_counted(self, text: str, speaker_id: int, params: dict) -> bytes:
         started = time.monotonic()
         self.requests += 1
         self.last_used = time.time()
@@ -694,6 +722,8 @@ class BackendPool:
             "last_used": b.last_used,
             "avg_ms": round(sum(recent) / len(recent)) if recent else None,
             "recent_ms": recent,
+            "inflight": getattr(b, "inflight", 0),
+            "waiting": getattr(b, "waiting", 0),
         }
 
     async def public_status(self) -> list[dict]:
