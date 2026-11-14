@@ -10,3 +10,4 @@ docker-compose.override.yml
 data/text_replacements.json
 data/compound_splits.json
 data/speech_history.db
+data/install_jobs/
