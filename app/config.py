@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     # 音声合成のバックエンド種別。
     #   "local"       … AivisSpeech Engine（aivis_backend_urls、GPU が要る）
     #   "aivis_cloud" … Aivis Cloud API（api.aivis-project.com、従量課金・GPU 不要）
-    # どちらを選んでも /speak の入出力は同じなので、呼び出し側（KIOKUPETA 等）は
+    # どちらを選んでも /speak の入出力は同じなので、呼び出し側（自作アプリ等）は
     # この設定を知らなくてよい。GPU を落としている間だけ aivis_cloud にしておき、
     # 復活したら local に戻せるよう、両方の設定を .env に残しておいて構わない。
     tts_provider: str = "local"
