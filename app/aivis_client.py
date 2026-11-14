@@ -1,29 +1,89 @@
-import httpx
+import asyncio
+import json
+import time
+import weakref
 from typing import Any
+
+import httpx
+
+# GET /aivm_models は、モデルの画像やサンプル音声が入ったマニフェストごと返すので、
+# モデルが増えると 100MB を超える（実測 約108MB）。これを台の数×呼び出し回数ぶん
+# 解析し続けるとルーターのメモリが数GB単位で膨らむため、
+#  1) 解析は別スレッドで（イベントループを止めない）
+#  2) 必要な項目だけ残して捨てる
+#  3) 短時間キャッシュし、同時取得は1本に束ねる
+# という形にしている。
+MODELS_CACHE_TTL = 15.0
+# 全台で共有: 巨大JSONの解析を同時に走らせない（イベントループごとに1つ。テストで複数ループを使うため）
+_models_fetch_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _fetch_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _models_fetch_locks.get(loop)
+    if lock is None:
+        lock = _models_fetch_locks[loop] = asyncio.Lock()
+    return lock
+
+
+def _slim_models(raw: bytes) -> dict[str, Any]:
+    """aivm_models の巨大なレスポンスから、ルーターが使う項目だけを取り出す。"""
+    data = json.loads(raw)
+    slim: dict[str, Any] = {}
+    for uuid, info in data.items():
+        manifest = info.get("manifest") or {}
+        slim[uuid] = {
+            "is_loaded": bool(info.get("is_loaded", False)),
+            "manifest": {
+                "name": manifest.get("name", ""),
+                "speakers": [
+                    {"uuid": sp.get("uuid", ""), "name": sp.get("name", ""), "local_id": sp.get("local_id")}
+                    for sp in manifest.get("speakers", [])
+                ],
+            },
+        }
+    return slim
 
 
 class AivisClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=120.0)
+        self._models_cache: "tuple[float, dict[str, Any]] | None" = None
 
     async def get_speakers(self) -> list[dict]:
         r = await self._client.get(f"{self.base_url}/speakers")
         r.raise_for_status()
         return r.json()
 
-    async def get_models(self) -> dict[str, Any]:
-        r = await self._client.get(f"{self.base_url}/aivm_models")
-        r.raise_for_status()
-        return r.json()
+    def invalidate_models_cache(self) -> None:
+        self._models_cache = None
+
+    async def get_models(self, max_age: float = MODELS_CACHE_TTL) -> dict[str, Any]:
+        """モデル一覧（必要な項目だけに絞ったもの）。max_age 秒以内の取得結果があればそれを返す。"""
+        cached = self._models_cache
+        if cached is not None and time.monotonic() - cached[0] <= max_age:
+            return cached[1]
+        async with _fetch_lock():
+            cached = self._models_cache  # 待っている間に他の呼び出しが取得済みかもしれない
+            if cached is not None and time.monotonic() - cached[0] <= max_age:
+                return cached[1]
+            r = await self._client.get(f"{self.base_url}/aivm_models")
+            r.raise_for_status()
+            data = await asyncio.to_thread(_slim_models, r.content)
+            del r
+            self._models_cache = (time.monotonic(), data)
+            return data
 
     async def load_model(self, aivm_uuid: str) -> None:
         r = await self._client.post(f"{self.base_url}/aivm_models/{aivm_uuid}/load")
         r.raise_for_status()
+        self.invalidate_models_cache()
 
     async def unload_model(self, aivm_uuid: str) -> None:
         r = await self._client.post(f"{self.base_url}/aivm_models/{aivm_uuid}/unload")
         r.raise_for_status()
+        self.invalidate_models_cache()
 
     async def audio_query(self, text: str, speaker_id: int) -> dict:
         r = await self._client.post(
@@ -117,6 +177,7 @@ class AivisClient:
                 files={"file": (os.path.basename(path), f, "application/octet-stream")},
                 timeout=900.0,
             )
+        self.invalidate_models_cache()
         r.raise_for_status()
 
     async def import_user_dict(self, words: dict, override: bool = True) -> None:
@@ -135,6 +196,7 @@ class AivisClient:
             f"{self.base_url}/aivm_models/{aivm_uuid}/uninstall",
             timeout=60.0,
         )
+        self.invalidate_models_cache()
         r.raise_for_status()
 
     async def install_model(self, filename: str, data: bytes) -> None:
@@ -144,6 +206,7 @@ class AivisClient:
             files={"file": (filename, data, "application/octet-stream")},
             timeout=600.0,
         )
+        self.invalidate_models_cache()
         r.raise_for_status()
 
     async def close(self) -> None:
