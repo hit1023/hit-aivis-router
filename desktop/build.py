@@ -11,6 +11,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows の標準出力は cp1252 のことがあり、日本語を含むコマンドの表示で UnicodeEncodeError になる
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 WIN = sys.platform == "win32"
@@ -36,7 +43,7 @@ def main() -> None:
     (out / "work").mkdir(parents=True, exist_ok=True)
 
     # MP3 変換に使う libsndfile（soundfile 同梱、LGPL）が、この OS で MP3 を書けるか先に確かめる
-    run(py, "-c", "import soundfile as sf; assert 'MP3' in sf.available_formats(), 'libsndfile に MP3 が無い'; print('libsndfile', sf.__libsndfile_version__, 'MP3 OK')")
+    run(py, "-c", "import soundfile as sf; assert 'MP3' in sf.available_formats(), 'libsndfile has no MP3 support'; print('libsndfile', sf.__libsndfile_version__, 'MP3 OK')")
 
     run(
         bindir / "pyinstaller", "--noconfirm", "--clean", "--onedir", "--name", "aivis-router",
