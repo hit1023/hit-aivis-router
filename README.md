@@ -594,3 +594,13 @@ CPU 合成は長文だと数秒かかるので、`POST /speak_stream` は文ご�
 `/speak` と同じ本文に `max_len`（既定 60）を足せます。各行は `{"i","n","text","backend","audio"(MP3 の base64)}`、失敗時は `{"error"}` の行で終わります。
 文の区切りは `app/splitter.py`（`。！？`・改行、短い断片は次へ連結、長い文は読点で分割）。合成は同じ台で順番に行うので「1 モデル 1 ノード」は崩れません。
 利用側の例は `hit-aivis-webui`（Generate）と `hit-orb-hologram`（`docs/TTS_STREAMING.md`）。
+
+---
+
+## ライセンス
+
+このリポジトリのコードは [MIT License](LICENSE) です。
+
+- 音声合成は [AivisSpeech Engine](https://github.com/Aivis-Project/AivisSpeech-Engine)（LGPL-3.0）が行います。このリポジトリには含まれていません。
+- 音声モデルは [Aivis Hub](https://hub.aivis-project.com/) で配布されており、モデルごとの利用規約・ライセンスに従ってください。
+- デスクトップ版に同梱される ffmpeg（imageio-ffmpeg）は GPL のビルドです。詳細は [aivis-desktop の THIRD_PARTY_NOTICES.md](https://github.com/hit1023/aivis-desktop/blob/main/THIRD_PARTY_NOTICES.md) を参照してください。
