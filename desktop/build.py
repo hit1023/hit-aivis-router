@@ -44,6 +44,8 @@ def main() -> None:
         "--paths", ROOT,
         "--collect-submodules", "uvicorn",
         "--collect-submodules", "app",
+        # soundfile が使う numpy は、PyInstaller 6.11 のフックだけだと内部モジュール(numpy._core._exceptions 等)を取りこぼす
+        "--collect-submodules", "numpy",
         "--exclude-module", "zenoh",
         "--exclude-module", "tkinter",
         HERE / "entry.py",
