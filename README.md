@@ -490,9 +490,30 @@ MP3（音声は pydub+ffmpeg で変換。デスクトップ版は libsndfile）�
 - `InstallJobStore` — モデルインストールのジョブ（ファイルと台ごとの状態）の保存と、再起動後の再開
 - `audio` — WAV → MP3 の変換（サーバー版は pydub+ffmpeg、デスクトップ版は libsndfile）
 
-> 台ごとの同時実行数は `BACKEND_CONCURRENCY` で絞れます（既定 `0` = 制限なし）。1以上にすると、超えた分は
-> ルーター内で先着順に待ち、`BACKEND_QUEUE_TIMEOUT`（既定60秒）を超えると 503 + `Retry-After` を返します。
-> 台ごとの `inflight` / `waiting` は `/backends/status` で見られます。設計は [docs/queue-design.md](docs/queue-design.md)。
+### Zenoh と キュー は何をしているか
+
+名前が似た役割に見えますが、やっていることは別物です。
+
+| | Zenoh（pub/sub） | キュー（順番待ち） |
+|---|---|---|
+| 役目 | 出来事を**知らせる**（掲示板・駅の放送） | 仕事を**順番にさばく**（窓口の整理券） |
+| 届け先 | 見ている人みんな（1対多） | 1つの仕事は1回だけ処理される |
+| 見ていないとき | 取りこぼす（後からは見られない） | 待つ。順番が来たら処理される |
+| このシステムで | モデル導入の進捗を画面へ流す | 台に同時に届く合成の数を絞る（`/speak`） |
+
+**Zenoh（進捗のお知らせ）**
+- ルーターが `aivis/install/<ジョブ>/start|node|resume|finish` に進捗を publish し、別の購読側が受けて SSE（`/events/install`）でブラウザへ中継します。
+- `aivis/install/status` に問い合わせると、今のジョブの状態を1回で取れます（見ていなかった間の取りこぼしを補う口）。
+- 音声データは通りません（TTS は Zenoh を使いません）。繋がらないときはプロセス内の配信に切り替わり、デスクトップ版には入っていません。
+- 「途中で止まっても続きから再開」できるのは Zenoh のおかげではなく、ジョブの状態を `data/install_jobs` に保存しているからです。
+
+**キュー（台ごとの同時実行の上限）**
+- 非力な台（CPU 版など）に同時に何本も届くと、全部が遅くなってタイムアウトします。そこで台の手前で、`BACKEND_CONCURRENCY` の数だけ同時に合成し、超えた分は**先着順**で待たせます（既定 `0` = 制限なし = 従来どおり）。
+- 待ちが `BACKEND_QUEUE_TIMEOUT`（既定60秒）を超えたら 503 + `Retry-After` で返します。台の不調とは扱わないので、退避も別の台での再試行もしません。
+- 仕組みはルーター内のメモリだけ（`asyncio.Semaphore`）で、`/speak` は同期のまま MP3 を返します。台ごとの `inflight`（合成中）/ `waiting`（順番待ち）は `/backends/status` で見られます。
+- 設計の詳細と、将来の Redis + arq（非同期ジョブ）の位置づけは [docs/queue-design.md](docs/queue-design.md)。
+
+> スライド版は [docs/aivis-router-architecture.pptx](docs/aivis-router-architecture.pptx)（2026-11 改訂）。
 
 ---
 
