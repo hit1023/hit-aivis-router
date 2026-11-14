@@ -474,6 +474,8 @@ MP3（音声は pydub+ffmpeg で変換。デスクトップ版は libsndfile）�
 ルーターの周辺
   ├─ 見回り（60秒ごと）  各台のモデルのロード状態を把握し、冷えたモデルを定位置の台で温め直す
   ├─ 管理 API（/backends）  台の追加・削除・無効化・マスター切替（ADMIN_TOKEN）。追加時は不足モデルと辞書を自動で配る
+  ├─ 読みチェック（/kana_verify・任意）  LLM（OpenAI互換API または claude -p）に読みを別途作らせ、エンジンの読みと照合。
+  │                          モデル名が空なら無効（設定すれば有効。/speak の経路には入らない）。詳細は「LLM読み判定の設定」
   ├─ モデルインストール  ファイルと台ごとの状態を data/install_jobs に保存。再起動後に続きから再開、一時失敗は自動再試行
   ├─ イベント配信（EventBus）  進捗を Zenoh の pub/sub で流し、/events/install（SSE）でブラウザへ中継
   │                          Zenoh に繋がらなければプロセス内配信に切り替わる（デスクトップ版はプロセス内のみ）
@@ -483,6 +485,7 @@ MP3（音声は pydub+ffmpeg で変換。デスクトップ版は libsndfile）�
 - `BackendPool` — 複数バックエンドの管理。台の選択（モデルの定位置・セッション・順番）、不調な台の退避と別の台でのやり直し、台の追加・削除・無効化・マスター切替
 - `ModelManager` — バックエンドごとのモデルロード状態とアイドルタイムアウトを管理
 - `AivisClient` / `AivisCloudClient` — AivisSpeech Engine / Aivis Cloud API の HTTP クライアント
+- `kana_checker` — 読みチェック。LLM（OpenAI互換API または `claude -p`）で単語の読みを作らせ、AivisSpeech の読みと比べる（任意。未設定なら無効）
 - `TextReplacer` — 音声合成前テキスト前処理（最長マッチ優先の文字列置換）
 - `SpeakerPresetManager` — 話者ごとの話速・音高などの既定値
 - `SpeechHistory` — 発話履歴のSQLite非同期書き込み・ページネーション検索
