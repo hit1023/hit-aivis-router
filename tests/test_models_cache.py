@@ -53,7 +53,14 @@ def test_cache_and_concurrent_dedupe_and_invalidate():
         assert calls["models"] == 1
         await c.get_models()  # キャッシュ内
         assert calls["models"] == 1
-        await c.load_model("uuid-b")  # 状態が変わるのでキャッシュを捨てる
+        # ロードの結果はキャッシュに直接反映し、一覧は取り直さない
+        await c.load_model("uuid-b")
+        assert (await c.get_models())["uuid-b"]["is_loaded"] is True
+        c._mark_loaded("uuid-a", False)  # unload_model が行う反映（別テストが unload_model を汚染するため直接呼ぶ）
+        assert (await c.get_models())["uuid-a"]["is_loaded"] is False
+        assert calls["models"] == 1
+        # インストール/アンインストールは対応関係が変わるので捨てる
+        await c.install_model("x.aivmx", b"x")
         await c.get_models()
         assert calls["models"] == 2
         await c.get_models(max_age=0)  # 強制再取得

@@ -13,7 +13,10 @@ import httpx
 #  2) 必要な項目だけ残して捨てる
 #  3) 短時間キャッシュし、同時取得は1本に束ねる
 # という形にしている。
-MODELS_CACHE_TTL = 15.0
+# 話者とモデルの対応はインストール/アンインストールでしか変わらず、ロード状態はルーター自身の
+# load/unload でキャッシュを直接更新するので、頻繁に取り直す必要はない（取り直すたびに
+# 100MB 超を受信・解析し、ルーターのメモリが数GBまで膨らんだ。実測）。
+MODELS_CACHE_TTL = 300.0
 # 全台で共有: 巨大JSONの解析を同時に走らせない（イベントループごとに1つ。テストで複数ループを使うため）
 _models_fetch_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
 
@@ -59,6 +62,15 @@ class AivisClient:
     def invalidate_models_cache(self) -> None:
         self._models_cache = None
 
+    def _mark_loaded(self, aivm_uuid: str, loaded: bool) -> None:
+        """load/unload の結果をキャッシュに直接反映する（再取得しない）。キャッシュが無ければ何もしない。"""
+        cached = self._models_cache
+        if cached is not None and aivm_uuid in cached[1]:
+            cached[1][aivm_uuid]["is_loaded"] = loaded
+        elif cached is not None:
+            # 未知のモデルが対象なら一覧自体が古いので捨てる
+            self._models_cache = None
+
     async def get_models(self, max_age: float = MODELS_CACHE_TTL) -> dict[str, Any]:
         """モデル一覧（必要な項目だけに絞ったもの）。max_age 秒以内の取得結果があればそれを返す。"""
         cached = self._models_cache
@@ -78,12 +90,12 @@ class AivisClient:
     async def load_model(self, aivm_uuid: str) -> None:
         r = await self._client.post(f"{self.base_url}/aivm_models/{aivm_uuid}/load")
         r.raise_for_status()
-        self.invalidate_models_cache()
+        self._mark_loaded(aivm_uuid, True)
 
     async def unload_model(self, aivm_uuid: str) -> None:
         r = await self._client.post(f"{self.base_url}/aivm_models/{aivm_uuid}/unload")
         r.raise_for_status()
-        self.invalidate_models_cache()
+        self._mark_loaded(aivm_uuid, False)
 
     async def audio_query(self, text: str, speaker_id: int) -> dict:
         r = await self._client.post(
